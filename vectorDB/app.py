@@ -18,9 +18,12 @@ import numpy as np
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from PIL import Image
-from transformers import AutoImageProcessor, AutoModel
-import torch
-import torch.nn.functional as F
+
+# Lazy-loaded ML modules (loaded in load_model)
+torch = None
+F = None
+AutoImageProcessor = None
+AutoModel = None
 
 
 def _resolve_path(env_name: str, default_relative: str) -> Path:
@@ -85,6 +88,18 @@ def load_filenames() -> List[str]:
 
 
 def load_model() -> tuple[Any, Any, str]:
+    global torch, F, AutoImageProcessor, AutoModel
+
+    print("Loading ML dependencies (torch/transformers)...")
+    import torch as _torch
+    import torch.nn.functional as _F
+    from transformers import AutoImageProcessor as _AutoImageProcessor, AutoModel as _AutoModel
+
+    torch = _torch
+    F = _F
+    AutoImageProcessor = _AutoImageProcessor
+    AutoModel = _AutoModel
+
     if torch.cuda.is_available():
         device = "cuda"
     elif torch.backends.mps.is_available():
