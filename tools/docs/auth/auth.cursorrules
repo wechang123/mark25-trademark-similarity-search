@@ -1,0 +1,73 @@
+# IP-DR 인증 시스템 개발 규칙
+
+## 프로젝트 컨텍스트
+- 프로젝트명: IP-DR AI 상표 등록 웹 서비스
+- 현재 개발: 통합 인증 시스템
+- 기술 스택: Next.js 14 (App Router), TypeScript, Supabase, Tailwind CSS
+- 개발 기간: 2025-07-11 ~ 2025-07-16
+- 제약사항: 사업자 등록 없음 (11-12월 예정)
+
+## 참조 문서
+- PRD: ./docs/PRD.xml (제품 요구사항)
+- TRD: ./docs/TRD.xml (기술 요구사항)
+
+## 코드 작성 규칙
+
+### TypeScript/React
+- 함수형 컴포넌트와 Hooks 사용
+- 모든 변수와 함수에 타입 명시
+- interface over type alias
+- 'use client' 디렉티브는 필요한 경우만
+- Server Components 기본, Client Components는 인터랙션 필요시만
+
+### 파일 구조
+- app/ 디렉토리: App Router 구조 준수
+- components/: 재사용 가능한 컴포넌트
+- lib/: 유틸리티 함수 및 설정
+- types/: TypeScript 타입 정의
+
+### 네이밍 컨벤션
+- 컴포넌트: PascalCase (예: AuthForm)
+- 함수/변수: camelCase (예: handleSubmit)
+- 상수: UPPER_SNAKE_CASE (예: MAX_LOGIN_ATTEMPTS)
+- 파일명: 컴포넌트는 PascalCase, 유틸은 camelCase
+
+### Supabase 사용
+- Server Components: createServerClient 사용
+- Client Components: createBrowserClient 사용
+- 환경변수 prefix: NEXT_PUBLIC_ (클라이언트), 없음 (서버)
+
+### 보안 원칙
+- 절대 시크릿 키를 클라이언트에 노출하지 않음
+- 모든 사용자 입력은 서버에서 검증
+- SQL Injection은 Supabase가 처리하지만 입력값 sanitize
+- Rate Limiting 적용 필수
+
+### 인증 시스템 특별 규칙
+- Feature Toggle 패턴으로 소셜 로그인 제어
+- 환경변수로 Provider 활성화/비활성화
+- 개발환경에서는 모든 Provider UI 표시
+- 프로덕션에서는 활성화된 Provider만 작동
+
+### 에러 처리
+- try-catch 블록 사용
+- 사용자 친화적인 에러 메시지
+- 에러 로깅 (개발: console, 프로덕션: Sentry)
+
+### 테스트
+- 컴포넌트별 단위 테스트 작성
+- 중요 플로우는 E2E 테스트 필수
+- 테스트 파일: *.test.ts, *.spec.ts
+
+### 주석
+- 복잡한 로직에만 주석 추가
+- JSDoc으로 함수 문서화
+- TODO: 미완성 기능 표시
+
+### Git 커밋
+- Conventional Commits 사용
+- feat: 새 기능
+- fix: 버그 수정
+- docs: 문서 수정
+- refactor: 리팩토링
+- test: 테스트 추가

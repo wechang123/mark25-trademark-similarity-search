@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PRD>
+  <DocumentInfo>
+    <ServiceName>상표 분석 v2</ServiceName>
+    <Version>1.1</Version>
+    <Date>2025-07-20</Date>
+    <Author>@oh79</Author>
+  </DocumentInfo>
+
+  <GoalsAndObjectives>
+    <Goal title="분석 정확도 확보">
+      <Metric>AI 분석 '등록 가능성'과 실제 심사 결과 일치율 90% 달성</Metric>
+      <Measurement>변리사에게 실제 출원 데이터를 받아 실행 결과와 비교</Measurement>
+    </Goal>
+    <Goal title="사용자 경험 혁신">
+      <Metric>평균 분석 소요 시간(Time-to-Result) 3분 이내 달성</Metric>
+      <Measurement>서비스 내 로그 분석 시스템을 통해 세션 시작부터 리포트 확인까지의 시간 측정</Measurement>
+    </Goal>
+    <Goal title="사업적 가치 증명">
+      <Metric>분석 완료 후 '출원 신청' 전환율 30% 달성</Metric>
+      <Measurement>GA를 통해 분석 결과 페이지의 CTA 버튼 클릭률 측정</Measurement>
+    </Goal>
+  </GoalsAndObjectives>
+
+  <FunctionalRequirements>
+    <Overview>
+      사용자가 상표 정보를 입력하면, AI 에이전트가 각 질문의 목적을 설명하는 확인형 대화를 통해 심층 정보를 수집하고, '3채널 분석'을 수행하여 최종 리포트를 제공한 뒤, 결과를 RPA 연동을 위해 DB에 저장하는 일련의 과정을 포함한다.
+    </Overview>
+    
+    <UserFlow>
+      <Step id="1" name="서비스 홈">사용자는 로그인 후 [상표 분석 시작하기] 버튼을 클릭한다.</Step>
+      <Step id="2" name="상표 유형 선택">문자 / 도형 / 결합 상표 중 하나를 선택한다.</Step>
+      <Step id="3" name="초기 정보 입력">선택한 유형에 맞는 상표명, 이미지 등을 입력한다.</Step>
+      <Step id="4" name="대화형 정보 수집">AI가 각 질문의 목적을 설명하며 분석에 필요한 정보를 순차적으로 질문하고, 사용자는 채팅창에 답변한다.</Step>
+      <Step id="5" name="중간 브리핑 및 심층 정보 요청">필수 정보 수집 완료 후, AI는 분석 계획을 브리핑하고 분석 정확도를 높이기 위한 추가 정보(예: 디자인 스토리)를 요청한다. 그 후 '분석 중' 상태로 전환된다.</Step>
+      <Step id="6" name="분석 결과 페이지">구조화된 최종 분석 보고서가 표시된다. 보고서 하단에는 [PDF로 저장], [출원 신청하기] 등의 CTA 버튼이 위치한다.</Step>
+    </UserFlow>
+
+    <FeatureGroups>
+      <FeatureGroup name="대화형 정보 수집 (Conversational Onboarding)">
+        <Requirement id="1-1">사용자는 명확한 예시와 함께 상표 유형(문자, 도형, 결합)을 선택할 수 있어야 한다.</Requirement>
+        <Requirement id="1-2">선택된 상표 유형에 따라 최적화된 입력 UI(텍스트 필드, 이미지 업로더 등)가 제공되어야 한다.</Requirement>
+        <Requirement id="1-3">AI 에이전트는 분석에 필요한 정보 체크리스트([상품/서비스 정보, 경쟁사 정보, 유사 이름 정보])를 기반으로, 각 질문의 목적("정확한 상품분류를 위해", "유사성 판단을 위해" 등)을 반드시 설명하며 누락된 정보를 순차적으로 질문해야 한다.</Requirement>
+        <Requirement id="1-4">사용자와 AI의 대화는 채팅 UI 형태로 제공되며, 전체 대화 기록이 유지되어야 한다.</Requirement>
+        <Requirement id="1-5">필수 정보 수집이 완료되면, AI는 분석 계획을 사용자에게 간략히 브리핑하고, 분석 정확도를 높이기 위한 심층 정보(예: 디자인 의도, 상표 스토리)를 추가로 요청하는 단계를 거쳐야 한다.</Requirement>
+      </FeatureGroup>
+      
+      <FeatureGroup name="3채널 분석 엔진 (3-Channel Analysis Engine)">
+        <Requirement id="2-1">정보 수집이 완료되면, AI 에이전트는 3가지 분석 도구를 자율적으로 실행해야 한다: KIPRIS 검색, 인터넷 검색, 법률 RAG.</Requirement>
+        <Requirement id="2-2">에이전트는 3가지 분석 결과를 종합적으로 추론하여, RPA가 처리하기 용이한 구조화된 JSON 형식의 최종 보고서를 생성해야 한다.</Requirement>
+        <Requirement id="2-3">분석 과정에서 사전에 정의된 중대 이슈(예: 동일 명칭 및 동일 분류의 등록 상표 발견)가 발생하면, 에이전트는 분석을 일시 중단하고 해당 사실을 사용자에게 알린 뒤, 확인 또는 추가 정보를 요청하는 로직을 포함해야 한다.</Requirement>
+      </FeatureGroup>
+
+      <FeatureGroup name="결과 처리 및 연동">
+        <Requirement id="3-1">최종 분석 보고서는 '핵심 요약', '법률 리스크', '유사 상표 목록', '최종 결론 및 제언' 등의 섹션으로 명확하게 구분되어 시각적으로 표시되어야 한다.</Requirement>
+        <Requirement id="3-2">생성된 최종 보고서(JSON)는 `trademark_analysis_results` 테이블에 저장되어야 한다.</Requirement>
+        <Requirement id="3-3">DB 저장 성공 시, 사용자에게 "분석 결과가 저장되어 출원 절차에 활용될 예정입니다." 와 같은 긍정적 피드백을 제공해야 한다.</Requirement>
+        <Requirement id="3-4">분석 과정에서 사용자의 추가 확인을 거친 이슈가 있었다면, 해당 내용이 최종 보고서에 어떻게 반영되었는지(예: "확인해주신 자회사 정보에 따라 권리 충돌 위험에서 제외함") 간략히 명시해야 한다.</Requirement>
+      </FeatureGroup>
+    </FeatureGroups>
+  </FunctionalRequirements>
+
+  <NonFunctionalRequirements>
+    <Requirement category="Performance">AI 분석 실행 시간을 제외한 모든 API 응답 시간은 평균 500ms 이하 목표. AI 분석의 전체 과정은 최대 3분을 넘지 않도록 최적화.</Requirement>
+    <Requirement category="Security">사용자가 업로드하는 모든 상표 이미지는 비공개로 처리하고, Supabase Storage의 접근 제어 정책을 통해 해당 사용자만 접근할 수 있도록 설정.</Requirement>
+    <Requirement category="DataAccuracy">AI가 참조하는 법률 정보(GCP RAG)는 특허청 최신 심사 기준에 맞춰 항상 동기화되어야 한다.</Requirement>
+  </NonFunctionalRequirements>
+</PRD>

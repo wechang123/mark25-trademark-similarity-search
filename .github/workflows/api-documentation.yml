@@ -1,0 +1,325 @@
+name: 🔧 API Documentation & Validation
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'src/app/api/**'
+      - 'src/infrastructure/swagger/**'
+      - 'package.json'
+      - '.github/workflows/api-documentation.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'src/app/api/**'
+      - 'src/infrastructure/swagger/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '18'
+  DOCS_DIR: 'docs/api'
+
+jobs:
+  # Phase 1: Schema validation
+  schema-validation:
+    name: 📋 Schema Validation
+    runs-on: ubuntu-latest
+    outputs:
+      validation-passed: ${{ steps.validate.outputs.passed }}
+      changes-detected: ${{ steps.changes.outputs.detected }}
+    
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: 🔧 Install dependencies
+        run: npm ci
+      
+      - name: 🔍 Validate API schemas
+        id: validate
+        run: |
+          npm run swagger:validate || exit_code=$?
+          if [ ${exit_code:-0} -eq 0 ]; then
+            echo "passed=true" >> $GITHUB_OUTPUT
+          else
+            echo "passed=false" >> $GITHUB_OUTPUT
+            exit $exit_code
+          fi
+      
+      - name: 🔄 Detect API changes
+        id: changes
+        run: |
+          npm run swagger:diff || echo "No previous snapshot found"
+          if [ -f "docs/api/changes.json" ]; then
+            echo "detected=true" >> $GITHUB_OUTPUT
+          else
+            echo "detected=false" >> $GITHUB_OUTPUT
+          fi
+
+  # Phase 2: Documentation generation
+  documentation-generation:
+    name: 📖 Generate Documentation
+    runs-on: ubuntu-latest
+    needs: schema-validation
+    if: needs.schema-validation.outputs.validation-passed == 'true'
+    
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+      
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: 🔧 Install dependencies
+        run: npm ci
+      
+      - name: 🏗️ Build project
+        run: npm run build
+      
+      - name: 📚 Generate API documentation
+        run: |
+          npm run swagger:generate
+          npm run swagger:changelog
+      
+      - name: 📊 Generate API statistics
+        run: npm run swagger:stats
+      
+      - name: 📁 Create docs directory
+        run: mkdir -p ${{ env.DOCS_DIR }}
+      
+      - name: 💾 Upload documentation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-documentation-${{ github.sha }}
+          path: |
+            ${{ env.DOCS_DIR }}/**
+            !${{ env.DOCS_DIR }}/.git*
+          retention-days: 30
+
+  # Phase 2.5: Breaking changes check
+  breaking-changes-check:
+    name: 🚨 Breaking Changes Check
+    runs-on: ubuntu-latest
+    needs: [schema-validation, documentation-generation]
+    if: github.event_name == 'pull_request' && needs.schema-validation.outputs.changes-detected == 'true'
+    
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+      
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: 🔧 Install dependencies
+        run: npm ci
+      
+      - name: 🔍 Check for breaking changes
+        id: breaking-changes
+        run: |
+          npm run swagger:breaking-changes || breaking_found=$?
+          if [ ${breaking_found:-0} -ne 0 ]; then
+            echo "❌ Breaking changes detected!"
+            echo "breaking-found=true" >> $GITHUB_OUTPUT
+          else
+            echo "✅ No breaking changes found"
+            echo "breaking-found=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: 💬 Comment on PR (Breaking Changes)
+        if: steps.breaking-changes.outputs.breaking-found == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let comment = '## 🚨 Breaking Changes Detected\n\n';
+            comment += 'This PR introduces breaking changes to the API. Please review:\n\n';
+            
+            // Read breaking changes if available
+            try {
+              const changes = fs.readFileSync('docs/api/breaking-changes.md', 'utf8');
+              comment += changes;
+            } catch (error) {
+              comment += 'See the full changelog for details.\n';
+            }
+            
+            comment += '\n⚠️ **Action Required**: Update documentation and notify API consumers.\n';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  # Phase 3: Documentation deployment
+  deploy-documentation:
+    name: 🚀 Deploy Documentation
+    runs-on: ubuntu-latest
+    needs: [schema-validation, documentation-generation]
+    if: github.ref == 'refs/heads/main' && needs.schema-validation.outputs.validation-passed == 'true'
+    
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: 🔧 Install dependencies
+        run: npm ci
+      
+      - name: 📚 Generate final documentation
+        run: |
+          npm run swagger:generate-all
+          npm run swagger:deploy-docs
+      
+      - name: 💾 Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: api-documentation-${{ github.sha }}
+          path: ${{ env.DOCS_DIR }}
+      
+      - name: 📄 Setup Pages
+        uses: actions/configure-pages@v4
+      
+      - name: 🏗️ Build Pages
+        run: |
+          mkdir -p _site
+          cp -r ${{ env.DOCS_DIR }}/* _site/
+          # Add index.html redirect
+          echo '<meta http-equiv="refresh" content="0; url=./api-documentation.html">' > _site/index.html
+      
+      - name: 📦 Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '_site'
+      
+      - name: 🌐 Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+      
+      - name: 📝 Commit updated documentation
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add docs/
+          git commit -m "📚 Auto-update API documentation [skip ci]" || exit 0
+          git push
+
+  # Phase 3: API Testing (optional)
+  api-testing:
+    name: 🧪 API Testing
+    runs-on: ubuntu-latest
+    needs: documentation-generation
+    if: github.event_name == 'pull_request'
+    continue-on-error: true
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+      
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: 🔧 Install dependencies
+        run: npm ci
+      
+      - name: 🗄️ Setup test database
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+        run: |
+          npm run db:migrate
+          npm run db:seed
+      
+      - name: 🚀 Start test server
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+        run: |
+          npm run dev &
+          sleep 30
+      
+      - name: 🧪 Run API tests
+        run: npm run swagger:test-endpoints
+      
+      - name: 📊 Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-test-results-${{ github.sha }}
+          path: docs/api/test-results.json
+
+  # Summary job
+  summary:
+    name: 📋 Workflow Summary
+    runs-on: ubuntu-latest
+    needs: [schema-validation, documentation-generation, breaking-changes-check, deploy-documentation, api-testing]
+    if: always()
+    
+    steps:
+      - name: 📊 Generate summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const results = {
+              'Schema Validation': '${{ needs.schema-validation.result }}',
+              'Documentation Generation': '${{ needs.documentation-generation.result }}',
+              'Breaking Changes Check': '${{ needs.breaking-changes-check.result || 'skipped' }}',
+              'Documentation Deployment': '${{ needs.deploy-documentation.result || 'skipped' }}',
+              'API Testing': '${{ needs.api-testing.result || 'skipped' }}'
+            };
+            
+            let summary = '## 🔧 API Documentation Workflow Summary\n\n';
+            for (const [job, result] of Object.entries(results)) {
+              const icon = result === 'success' ? '✅' : result === 'failure' ? '❌' : result === 'skipped' ? '⏭️' : '⚠️';
+              summary += `${icon} **${job}**: ${result}\n`;
+            }
+            
+            if ('${{ needs.schema-validation.outputs.changes-detected }}' === 'true') {
+              summary += '\n🔄 **API changes detected** in this workflow.\n';
+            }
+            
+            core.summary.addRaw(summary);
+            await core.summary.write();

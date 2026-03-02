@@ -1,0 +1,2968 @@
+// 서버 전용 키프리스 API 모듈 (ES modules 호환)
+
+export interface KiprisTrademarkInfo {
+  serialNumber?: string
+  applicationNumber?: string
+  appReferenceNumber?: string
+  applicationDate?: string
+  publicNumber?: string
+  publicDate?: string
+  registrationPublicNumber?: string
+  registrationPublicDate?: string
+  registrationNumber?: string
+  regReferenceNumber?: string
+  registrationDate?: string
+  priorityClaimNumber?: string
+  priorityClaimDate?: string
+  internationalRegisterNumber?: string
+  internationalRegisterDate?: string
+  applicationStatus?: string
+  goodsClassificationCode?: string
+  applicantName?: string
+  agentName?: string
+  registrationRightholderName?: string
+  title?: string // 이게 실제 상표명
+  fulltextExistFlag?: string
+  imagePath?: string
+  thumbnailPath?: string
+  similarityScore?: number // 계산된 유사도
+  riskLevel?: "LOW" | "MEDIUM" | "HIGH"
+  rejectionReason?: string // 거절 사유 (전체)
+  rejectionReasonSummary?: string // 거절 사유 (한 줄 요약)
+  legalGround?: string // 법적 근거
+  pdfFileUrl?: string // PDF 파일 URL
+  docName?: string // 문서명
+  /**
+   * 이 항목이 유사군 코드 검색으로 매칭되었을 때, 적용된 유사군 코드 목록
+   */
+  matchedSimilarCodes?: string[]
+  /**
+   * KIPRIS API로부터 조회한 해당 상표의 실제 유사군 코드 목록
+   */
+  similarityCodes?: string[]
+  rejectionInfo?: {
+    rejectionDate?: string
+    rejectionReasons?: string[]
+    decisionNumber?: string
+    appealStatus?: string
+    finalDecision?: string
+  }
+}
+
+export interface KiprisSearchResult {
+  total: number;
+  items: KiprisTrademarkInfo[];
+  sameIndustryCount: number;
+  riskScore: number;
+  riskLevel: "low" | "medium" | "high";
+  searchQuery: string;
+  searchTimestamp: string;
+}
+
+// -----------------------------
+// Optimization: in-memory cache & quota cooldown
+// -----------------------------
+type RejectionCacheData = {
+  rejectionReason?: string;
+  rejectionReasonSummary?: string;
+  legalGround?: string;
+  rejectionDate?: string;
+  decisionNumber?: string;
+  documentType?: string;
+  filePath?: string;
+  pdfFileUrl?: string;
+  docName?: string;
+  rejectionDetails?: {
+    rejectionType: string;
+    rejectionReasons: string[];
+    decisionAuthority: string;
+    appealDeadline?: string;
+    nextSteps?: string;
+  };
+};
+
+const rejectionInfoCache = new Map<string, { cachedAt: number; data: RejectionCacheData }>();
+const REJECTION_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+let kiprisQuotaCooldownUntil = 0; // epoch ms
+function setQuotaCooldown(minutes: number) {
+  const until = Date.now() + minutes * 60 * 1000;
+  kiprisQuotaCooldownUntil = Math.max(kiprisQuotaCooldownUntil, until);
+}
+
+// 🆕 Similarity code search cache (24h)
+type SimilarityCacheEntry = { cachedAt: number; items: KiprisTrademarkInfo[] };
+type SimilarityCodeCacheEntry = { cachedAt: number; codes: string[] };
+const similarityCodeCache = new Map<string, SimilarityCacheEntry>();
+const similarityCodeFetchCache = new Map<string, SimilarityCodeCacheEntry>();
+const SIMILARITY_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+export async function searchKiprisTrademarks(
+  trademark: string,
+  productClassificationCodes: string[],
+  similarGroupCodes: string[],
+  designatedProducts: string[],
+): Promise<KiprisSearchResult> {
+  const searchTimestamp = new Date().toISOString();
+
+  console.log(`🔍 [KIPRIS] Starting search for "${trademark}"`);
+
+  // 안전한 문자열 처리
+  const safeTrademark = (trademark || "").toString().trim();
+
+  if (!safeTrademark) {
+    throw new Error("Invalid trademark parameter");
+  }
+
+  // 환경변수 검증
+  const kiprisKey = process.env.KIPRIS_SEARCH_API_KEY || process.env.KIPRIS_API_KEY;
+
+  if (!kiprisKey || kiprisKey.trim() === "") {
+    console.error("❌ [SERVER] KIPRIS_SEARCH_API_KEY or KIPRIS_API_KEY is missing or empty");
+    throw new Error("KIPRIS API key environment variable is not set or empty. Please configure your API key.");
+  }
+
+  console.log(`🚀 [KIPRIS] API key validated`);
+
+  try {
+    let searchResults: KiprisTrademarkInfo[] = [];
+
+    // PARALLEL EXECUTION: Run free search and trademark name search simultaneously
+    console.log(`🔄 [KIPRIS] Starting parallel searches (free + trademark name)...`);
+    
+    const searchPromises: Promise<KiprisTrademarkInfo[]>[] = [
+      // 1. Free search (자유 검색)
+      performKiprisFreeSearch(safeTrademark, kiprisKey),
+      // 2. Trademark name search (상표 명칭 검색)
+      performKiprisNameSearch(safeTrademark, kiprisKey)
+    ];
+
+    // Execute all searches in parallel
+    const allSearchResults = await Promise.all(searchPromises);
+    
+    // Combine all results
+    const combinedResults = allSearchResults.flat();
+    console.log(`📊 [KIPRIS] Combined ${combinedResults.length} results from parallel searches`);
+
+    // Remove duplicates
+    searchResults = removeDuplicateTrademarks(combinedResults);
+
+    // Filter by similar group codes if provided
+    if (similarGroupCodes && similarGroupCodes.length > 0) {
+      searchResults = filterBySimilarGroupCodes(searchResults, similarGroupCodes);
+    }
+
+    // 3. If we have application numbers, get similarity codes for each trademark
+    if (searchResults.length > 0) {
+      console.log(`🔍 [KIPRIS] Fetching similarity codes for ${searchResults.length} trademarks...`);
+      const resultsWithSimilarityCodes = await fetchSimilarityCodesForTrademarks(searchResults, kiprisKey);
+      searchResults = resultsWithSimilarityCodes;
+    }
+
+    // 결과 분석 및 변환
+    const analyzedResults = analyzeKiprisResults(
+      searchResults,
+      safeTrademark,
+      productClassificationCodes,
+      similarGroupCodes,
+      designatedProducts,
+      searchTimestamp
+    );
+    
+    console.log(`✅ [KIPRIS] Search completed: ${searchResults.length} final results`);
+    return analyzedResults;
+
+  } catch (error) {
+    console.error('❌ [KIPRIS] Search failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * 키프리스 getWordSearch API 호출 함수
+ */
+async function performKiprisWordSearch(
+  trademark: string,
+  kiprisKey: string
+): Promise<KiprisTrademarkInfo[]> {
+  console.log(`🔍 [KIPRIS] Calling getWordSearch API for "${trademark}"`);
+  
+  const url = `http://plus.kipris.or.kr/kipo-api/kipi/trademarkInfoSearchService/getWordSearch`;
+  const params = new URLSearchParams({
+    searchString: trademark,
+    searchRecentYear: '0', // 전체 기간 검색
+    ServiceKey: kiprisKey
+  });
+
+  try {
+    const response = await fetch(`${url}?${params.toString()}`, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'IP-Doctor/1.0',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const xmlText = await response.text();
+    console.log(`📄 [KIPRIS] Received XML response, length: ${xmlText.length}`);
+
+    // XML 파싱
+    const items = parseKiprisWordSearchXML(xmlText);
+    console.log(`✅ [KIPRIS] Parsed ${items.length} items from XML`);
+
+    return items;
+
+  } catch (error) {
+    console.error('❌ [KIPRIS] getWordSearch API call failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Perform exact name search using KIPRIS API
+ * This searches for exact trademark name matches
+ */
+async function performExactNameSearch(
+  trademark: string,
+  kiprisKey: string
+): Promise<KiprisTrademarkInfo[]> {
+  console.log(`🔍 [KIPRIS] Calling exact name search for "${trademark}"`);
+  
+  const url = `http://plus.kipris.or.kr/kipo-api/kipi/trademarkInfoSearchService/getAdvancedSearch`;
+  const params = new URLSearchParams({
+    trademarkName: trademark, // Exact name search
+    searchRecentYear: '0', // 전체 기간 검색
+    ServiceKey: kiprisKey
+  });
+
+  try {
+    const response = await fetch(`${url}?${params.toString()}`, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'IP-Doctor/1.0',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const xmlText = await response.text();
+    console.log(`📄 [KIPRIS] Received exact name search XML response, length: ${xmlText.length}`);
+
+    // Parse XML - reuse existing parser
+    const items = parseKiprisAdvancedXML(xmlText);
+    console.log(`✅ [KIPRIS] Parsed ${items.length} items from exact name search`);
+
+    return items;
+
+  } catch (error) {
+    console.error('❌ [KIPRIS] Exact name search failed:', error);
+    // Return empty array on failure to allow other searches to continue
+    return [];
+  }
+}
+
+/**
+ * Remove duplicate trademarks based on application number
+ */
+function removeDuplicateTrademarks(trademarks: KiprisTrademarkInfo[]): KiprisTrademarkInfo[] {
+  const seen = new Set<string>();
+  const unique: KiprisTrademarkInfo[] = [];
+  
+  for (const trademark of trademarks) {
+    const key = trademark.applicationNumber;
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(trademark);
+    }
+  }
+  
+  console.log(`🧹 [KIPRIS] Removed ${trademarks.length - unique.length} duplicates, ${unique.length} unique results`);
+  return unique;
+}
+
+/**
+ * Filter trademarks by matching similar group codes
+ */
+function filterBySimilarGroupCodes(
+  trademarks: KiprisTrademarkInfo[], 
+  targetCodes: string[]
+): KiprisTrademarkInfo[] {
+  if (!targetCodes || targetCodes.length === 0) {
+    return trademarks;
+  }
+  
+  const filtered = trademarks.filter(trademark => {
+    // Check if any of the trademark's similar group codes match our target codes
+    const trademarkCodes = trademark.similarityCode?.split(',').map(c => c.trim()) || [];
+    return trademarkCodes.some(code => targetCodes.includes(code));
+  });
+  
+  console.log(`🎯 [KIPRIS] Filtered to ${filtered.length}/${trademarks.length} trademarks with matching similar group codes`);
+  return filtered;
+}
+
+/**
+ * Fetch similarity codes for trademarks using trademarkSimilarityCodeInfo API
+ */
+async function fetchSimilarityCodesForTrademarks(
+  trademarks: KiprisTrademarkInfo[], 
+  kiprisKey: string
+): Promise<KiprisTrademarkInfo[]> {
+  console.log(`🔍 [KIPRIS] Fetching similarity codes for ${trademarks.length} trademarks`);
+  
+  const updatedTrademarks = await Promise.all(
+    trademarks.map(async (trademark) => {
+      if (!trademark.applicationNumber) {
+        return trademark;
+      }
+      
+      try {
+        const apiUrl = `http://plus.kipris.or.kr/openapi/rest/trademarkInfoSearchService/trademarkSimilarityCodeInfo`;
+        const params = new URLSearchParams({
+          applicationNumber: trademark.applicationNumber,
+          accessKey: kiprisKey
+        });
+        
+        const response = await fetch(`${apiUrl}?${params.toString()}`, {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'IP-Doctor/1.0'
+          }
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          // Extract similarity codes from response and add to trademark
+          if (data.response?.body?.items?.item) {
+            const items = Array.isArray(data.response.body.items.item) 
+              ? data.response.body.items.item 
+              : [data.response.body.items.item];
+            
+            const similarityCodes = items
+              .map((item: any) => item.similarityCode)
+              .filter(Boolean)
+              .join(',');
+            
+            return {
+              ...trademark,
+              similarityCode: similarityCodes || trademark.similarityCode
+            };
+          }
+        }
+      } catch (error) {
+        console.warn(`⚠️ [KIPRIS] Failed to fetch similarity codes for ${trademark.applicationNumber}:`, error);
+      }
+      
+      return trademark;
+    })
+  );
+  
+  console.log(`✅ [KIPRIS] Similarity codes fetched for trademarks`);
+  return updatedTrademarks;
+}
+
+/**
+ * getWordSearch XML 응답 파싱 함수
+ */
+function parseKiprisWordSearchXML(xmlText: string): KiprisTrademarkInfo[] {
+  const items: KiprisTrademarkInfo[] = [];
+  
+  try {
+    // XML에서 <item> 태그들을 추출
+    const itemMatches = xmlText.match(/<item>([\s\S]*?)<\/item>/g);
+    
+    if (!itemMatches) {
+      console.warn('⚠️ [KIPRIS] No <item> tags found in XML response');
+      return items;
+    }
+
+    for (const itemXml of itemMatches) {
+      try {
+        const item = parseKiprisItemXML(itemXml);
+        if (item) {
+          items.push(item);
+        }
+      } catch (itemError) {
+        console.warn('⚠️ [KIPRIS] Failed to parse item XML:', itemError);
+      }
+    }
+
+    console.log(`✅ [KIPRIS] Successfully parsed ${items.length} items`);
+    return items;
+
+  } catch (error) {
+    console.error('❌ [KIPRIS] XML parsing failed:', error);
+    return items;
+  }
+}
+
+/**
+ * 개별 상표 아이템 XML 파싱 함수
+ */
+function parseKiprisItemXML(itemXml: string): KiprisTrademarkInfo | null {
+  try {
+    const extractValue = (tagName: string): string => {
+      const regex = new RegExp(`<${tagName}>([^<]*)</${tagName}>`);
+      const match = itemXml.match(regex);
+      return match ? match[1].trim() : '';
+    };
+
+    const item: KiprisTrademarkInfo = {
+      serialNumber: extractValue('indexNo'),
+      applicationNumber: extractValue('applicationNumber'),
+      applicationDate: extractValue('applicationDate'),
+      publicNumber: extractValue('publicationNumber'),
+      publicDate: extractValue('publicationDate'),
+      registrationPublicNumber: extractValue('registrationPublicNumber'),
+      registrationPublicDate: extractValue('registrationPublicDate'),
+      registrationNumber: extractValue('registrationNumber'),
+      registrationDate: extractValue('registrationDate'),
+      priorityClaimNumber: extractValue('priorityNumber'),
+      priorityClaimDate: extractValue('priorityDate'),
+      applicationStatus: extractValue('applicationStatus'),
+      goodsClassificationCode: extractValue('classificationCode'),
+      applicantName: extractValue('applicantName'),
+      agentName: extractValue('agentName'),
+      registrationRightholderName: extractValue('regPrivilegeName'),
+      title: extractValue('title'),
+      fulltextExistFlag: extractValue('fullText'),
+      imagePath: extractValue('drawing'),
+      thumbnailPath: extractValue('bigDrawing'),
+      similarityScore: 0, // 기본값, 나중에 계산
+      riskLevel: 'LOW' as const, // 기본값, 나중에 계산
+    };
+
+    // 필수 필드 검증
+    if (!item.title || !item.applicationNumber) {
+      console.warn('⚠️ [KIPRIS] Item missing required fields:', { title: item.title, applicationNumber: item.applicationNumber });
+      return null;
+    }
+
+    return item;
+
+  } catch (error) {
+    console.error('❌ [KIPRIS] Item XML parsing failed:', error);
+    return null;
+  }
+}
+
+/**
+ * 유사군 코드 직접 검색 API (similarityCodesearchInfo)
+ * 문서: /openapi/rest/trademarkInfoSearchService/similarityCodesearchInfo
+ */
+async function performSimilarityCodeSearch(
+  similarGroupCodes: string[],
+  kiprisKey: string,
+  docsStart: number = 1,
+  docsCount: number = 100,
+): Promise<KiprisTrademarkInfo[]> {
+  const cacheKey = `${similarGroupCodes.sort().join('|')}|${docsStart}|${docsCount}`;
+  const cached = similarityCodeCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < SIMILARITY_CACHE_TTL_MS) {
+    console.log(`🗃️ [KIPRIS] Using cached similarityCodesearchInfo: ${similarGroupCodes.length} codes`);
+    return cached.items.map(i => ({ ...i, matchedSimilarCodes: [...(i.matchedSimilarCodes || []), ...similarGroupCodes] }));
+  }
+  // 유사군 코드를 파이프(|)로 연결
+  const similarityCodeParam = similarGroupCodes.join('|');
+  const baseUrls = [
+    'https://plus.kipris.or.kr/openapi/rest/trademarkInfoSearchService/similarityCodesearchInfo',
+    'http://plus.kipris.or.kr/openapi/rest/trademarkInfoSearchService/similarityCodesearchInfo',
+  ];
+
+  for (const baseUrl of baseUrls) {
+    try {
+      const url = `${baseUrl}?similarityCode=${encodeURIComponent(similarityCodeParam)}&docsStart=${docsStart}&docsCount=${docsCount}&accessKey=${kiprisKey}`;
+      console.log(`🔍 [KIPRIS] similarityCodesearchInfo URL: ${url.replace(kiprisKey, '***')}`);
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        console.warn(`⚠️ [KIPRIS] similarityCodesearchInfo HTTP ${response.status}`);
+        continue;
+      }
+
+      const xmlText = await response.text();
+      // 응답 파싱
+      const items = parseSimilarityCodeXML(xmlText);
+      // 매칭된 유사군 코드 메타태그 추가
+      items.forEach(i => { i.matchedSimilarCodes = [...similarGroupCodes]; });
+      if (items.length > 0) {
+        similarityCodeCache.set(cacheKey, { cachedAt: Date.now(), items });
+        return items;
+      }
+    } catch (err) {
+      console.warn('⚠️ [KIPRIS] similarityCodesearchInfo request failed:', err);
+    }
+  }
+
+  return [];
+}
+
+function parseSimilarityCodeXML(xmlText: string): KiprisTrademarkInfo[] {
+  try {
+    const resultCodeMatch = xmlText.match(/<resultCode>(.*?)<\/resultCode>/);
+    const resultCode = resultCodeMatch ? resultCodeMatch[1] : '';
+    if (resultCode && resultCode !== '00') {
+      console.warn(`[KIPRIS] similarityCodesearchInfo resultCode=${resultCode}`);
+    }
+
+    const tradeMarkInfoBlocks = xmlText.match(/<TradeMarkInfo>([\s\S]*?)<\/TradeMarkInfo>/g);
+    if (!tradeMarkInfoBlocks) return [];
+
+    const items: KiprisTrademarkInfo[] = [];
+    for (const block of tradeMarkInfoBlocks) {
+      const item: KiprisTrademarkInfo = {
+        serialNumber: extractXMLValue(block, 'SerialNumber'),
+        applicationNumber: extractXMLValue(block, 'ApplicationNumber'),
+        appReferenceNumber: extractXMLValue(block, 'AppReferenceNumber'),
+        applicationDate: formatDate(extractXMLValue(block, 'ApplicationDate')),
+        publicNumber: extractXMLValue(block, 'PublicNumber'),
+        publicDate: formatDate(extractXMLValue(block, 'PublicDate')),
+        registrationPublicNumber: extractXMLValue(block, 'RegistrationPublicNumber'),
+        registrationPublicDate: formatDate(extractXMLValue(block, 'RegistrationPublicDate')),
+        registrationNumber: extractXMLValue(block, 'RegistrationNumber'),
+        regReferenceNumber: extractXMLValue(block, 'RegReferenceNumber'),
+        registrationDate: formatDate(extractXMLValue(block, 'RegistrationDate')),
+        priorityClaimNumber: extractXMLValue(block, 'PriorityClaimNumber'),
+        priorityClaimDate: formatDate(extractXMLValue(block, 'PriorityClaimDate')),
+        internationalRegisterNumber: extractXMLValue(block, 'InternationalRegisterNumber'),
+        internationalRegisterDate: formatDate(extractXMLValue(block, 'InternationalRegisterDate')),
+        applicationStatus: extractXMLValue(block, 'ApplicationStatus'),
+        goodsClassificationCode: extractXMLValue(block, 'GoodClassificationCode'),
+        applicantName: extractXMLValue(block, 'ApplicantName'),
+        agentName: extractXMLValue(block, 'AgentName'),
+        registrationRightholderName: extractXMLValue(block, 'RegistrationRightholderName'),
+        title: extractXMLValue(block, 'Title'),
+        fulltextExistFlag: extractXMLValue(block, 'FulltextExistFlag'),
+        imagePath: extractXMLValue(block, 'ImagePath'),
+        thumbnailPath: extractXMLValue(block, 'ThumbnailPath'),
+        similarityScore: 0,
+        riskLevel: 'LOW',
+      };
+      if (item.title && (item.applicationNumber || item.appReferenceNumber)) {
+        items.push(item);
+      }
+    }
+    return items;
+  } catch (e) {
+    console.warn('⚠️ [KIPRIS] Failed to parse similarityCodesearchInfo XML:', e);
+    return [];
+  }
+}
+async function performKiprisSearchFixed(
+  trademark: string,
+  productClassificationCodes: string[],
+  similarGroupCodes: string[],
+  designatedProducts: string[],
+  kiprisKey: string,
+): Promise<KiprisTrademarkInfo[]> {
+  // Advanced Search 실행 with enhanced filtering
+
+  const allResults: KiprisTrademarkInfo[] = [];
+
+  // HTTPS를 먼저 시도하고, 실패하면 HTTP 시도
+  const baseUrls = [
+    "https://plus.kipris.or.kr/kipo-api/kipi/trademarkInfoSearchService/getAdvancedSearch",
+    "http://plus.kipris.or.kr/kipo-api/kipi/trademarkInfoSearchService/getAdvancedSearch",
+  ];
+
+  for (const baseUrl of baseUrls) {
+    // Base URL 시도 중
+    
+    try {
+      let url = `${baseUrl}?ServiceKey=${kiprisKey}`;
+
+      // 상표명칭 (trademarkName)
+      if (trademark) {
+        url += `&trademarkName=${encodeURIComponent(trademark)}`;
+      }
+
+      // 상품분류코드 (classification) - 모든 분류번호 사용
+      if (productClassificationCodes && productClassificationCodes.length > 0) {
+        // 모든 분류번호를 파이프(|)로 연결하여 전송
+        const classificationParam = productClassificationCodes.join("|");
+        url += `&classification=${encodeURIComponent(classificationParam)}`;
+        console.log(`🔍 [SERVER] Using classification codes: ${productClassificationCodes.join(", ")}`);
+        console.log(`🔍 [SERVER] Classification parameter: ${classificationParam}`);
+      }
+
+      // 🎯 유사군 코드 필터링 활성화 (Stage 1에서 받은 코드들 사용)
+      if (similarGroupCodes && similarGroupCodes.length > 0) {
+        const similarGroupParam = similarGroupCodes.join("|");
+        url += `&similarGroupCode=${encodeURIComponent(similarGroupParam)}`;
+        console.log(`🎯 [SERVER] Using similar group codes: ${similarGroupCodes.join(", ")}`);
+      }
+
+      // 🔧 등록 가능성 판단에 필요한 상태만 필터링 ('등록, 출원중, 공고중, 심사중, 심판중')
+      // registration=등록, application=출원중, publication=공고중, examination=심사중, trial=심판중
+      url += `&application=true&registration=true&publication=true&examination=true&trial=true`;
+      // 제외할 상태들: refused=거절, expiration=소멸, withdrawal=포기, cancel=취소, abandonment=포기
+      url += `&refused=false&expiration=false&withdrawal=false&cancel=false&abandonment=false`;
+      
+      console.log(`🚀 [SERVER] Status filtering: Only relevant statuses (등록, 출원중, 공고중, 심사중, 심판중)`);
+
+      // 기타 고정 파라미터
+      url += `&trademark=true&serviceMark=true&businessEmblem=true&collectiveMark=true&geoOrgMark=true&trademarkServiceMark=true&certMark=true&geoCertMark=true&internationalMark=true&character=true&figure=true&compositionCharacter=true&figureComposition=true&fragrance=true&sound=true&color=true&colorMixed=true&dimension=true&hologram=true&invisible=true&motion=true&visual=true`;
+      url += `&docsStart=1&docsCount=100`; // 결과 수 제한
+
+      // API 호출 (로그 간소화)
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => {
+        console.log(`⏰ [SERVER] Request timeout for KIPRIS advanced search`);
+        controller.abort();
+      }, 60000); // 60초 타임아웃
+
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "application/xml, text/xml, */*",
+          "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+          "Accept-Encoding": "gzip, deflate, br",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+          "Upgrade-Insecure-Requests": "1"
+        },
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      console.log(`📡 [SERVER] Fetch request completed`);
+      console.log(`📡 [SERVER] Response status: ${response.status} ${response.statusText}`);
+
+      if (!response.ok) {
+        console.error(`❌ [SERVER] HTTP error: ${response.status} ${response.statusText}`);
+        const errorText = await response.text();
+        console.error("❌ [SERVER] Error response body:", errorText.substring(0, 500));
+        throw new Error(`KIPRIS API HTTP error: ${response.status} ${response.statusText}`);
+      }
+
+      const xmlText = await response.text();
+      // XML 응답 수신됨
+      
+      // 응답 코드 확인
+      const resultCodeMatch = xmlText.match(/<resultCode>(.*?)<\/resultCode>/);
+      if (resultCodeMatch && resultCodeMatch[1] !== "00") {
+        console.log(`📋 [SERVER] KIPRIS Response Code: "${resultCodeMatch[1]}"`);
+      }
+
+      if (!xmlText || xmlText.length < 50) {
+        console.warn(`⚠️ [SERVER] Empty or too short response for advanced search`);
+        return []; // 결과 없음
+      }
+
+      // XML 파싱 및 데이터 추출
+      const items = parseKiprisXMLImproved(xmlText);
+      // Advanced search 파싱 완료
+
+      if (items.length > 0) {
+        // 🎯 추가 유사군 코드 매칭 필터링
+        const filteredItems = await filterBySimilarityCode(items, similarGroupCodes);
+        
+        allResults.push(...filteredItems);
+        console.log(`✅ [SERVER] Got ${items.length} raw results, ${filteredItems.length} after similarity filtering`);
+        break; // 첫 번째 URL에서 결과를 얻으면 충분
+      }
+
+      // API 호출 간격 (필요시)
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    } catch (error) {
+      console.error(`❌ [SERVER] Request failed for KIPRIS advanced search:`, error);
+
+      if (error instanceof Error && error.name === "AbortError") {
+        console.error(`⏰ [SERVER] Request timeout for KIPRIS advanced search`);
+      }
+
+      continue; // 다음 URL 시도
+    }
+  }
+
+  // 중복 제거
+  const uniqueResults = removeDuplicateTrademarks(allResults);
+  console.log(`📊 [SERVER] KIPRIS advanced search summary: ${allResults.length} total, ${uniqueResults.length} unique`);
+
+  return uniqueResults;
+}
+
+/**
+ * 🚀 KIPRIS 자유 검색 API 호출
+ */
+async function performKiprisFreeSearch(
+  trademark: string,
+  kiprisKey: string
+): Promise<KiprisTrademarkInfo[]> {
+  // Free Search 실행
+  
+  const allResults: KiprisTrademarkInfo[] = [];
+  
+  // HTTPS를 먼저 시도하고, 실패하면 HTTP 시도
+  const baseUrls = [
+    "https://plus.kipris.or.kr/openapi/rest/trademarkInfoSearchService/freeSearchInfo",
+    "http://plus.kipris.or.kr/openapi/rest/trademarkInfoSearchService/freeSearchInfo",
+  ];
+
+  for (const baseUrl of baseUrls) {
+    // Free search URL 시도 중
+    
+    try {
+      let url = `${baseUrl}?accessKey=${kiprisKey}`;
+      url += `&word=${encodeURIComponent(trademark)}`;
+      url += `&docsStart=1&docsCount=100`; // 결과 수 제한
+
+      // Free search API 호출
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => {
+        console.log(`⏰ [SERVER] Request timeout for KIPRIS free search`);
+        controller.abort();
+      }, 60000); // 60초 타임아웃
+
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "application/xml, text/xml, */*",
+          "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+          "Accept-Encoding": "gzip, deflate, br",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+          "Upgrade-Insecure-Requests": "1"
+        },
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      console.log(`📡 [SERVER] Free search response status: ${response.status}`);
+
+      if (!response.ok) {
+        console.error(`❌ [SERVER] Free search HTTP error: ${response.status}`);
+        continue;
+      }
+
+      const xmlText = await response.text();
+      // Free search XML 응답 수신됨
+
+      if (!xmlText || xmlText.length < 50) {
+        console.warn(`⚠️ [SERVER] Empty or too short free search response`);
+        continue;
+      }
+
+      // XML 파싱 및 데이터 추출 (자유 검색용)
+      const items = parseKiprisXMLForFreeSearch(xmlText);
+      console.log(`📊 [SERVER] Parsed ${items.length} items from free search XML`);
+
+      if (items.length > 0) {
+        allResults.push(...items);
+        console.log(`✅ [SERVER] Free search got ${items.length} results`);
+        break; // 첫 번째 URL에서 결과를 얻으면 충분
+      }
+
+      // API 호출 간격 (필요시)
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    } catch (error) {
+      console.error(`❌ [SERVER] Free search request failed:`, error);
+
+      if (error instanceof Error && error.name === "AbortError") {
+        console.error(`⏰ [SERVER] Free search request timeout`);
+      }
+
+      continue; // 다음 URL 시도
+    }
+  }
+
+  console.log(`📊 [SERVER] Free search summary: ${allResults.length} total results`);
+  return allResults;
+}
+
+/**
+ * 🚀 KIPRIS 상표명 검색 API 호출
+ */
+async function performKiprisNameSearch(
+  trademark: string,
+  kiprisKey: string
+): Promise<KiprisTrademarkInfo[]> {
+  console.log(`🔍 [SERVER] ===== PERFORM KIPRIS NAME SEARCH =====`);
+  console.log(`🔍 [SERVER] Name search trademark: "${trademark}"`);
+  
+  const allResults: KiprisTrademarkInfo[] = [];
+  
+  // HTTPS를 먼저 시도하고, 실패하면 HTTP 시도
+  const baseUrls = [
+    "https://plus.kipris.or.kr/openapi/rest/trademarkInfoSearchService/trademarkNameSearchInfo",
+    "http://plus.kipris.or.kr/openapi/rest/trademarkInfoSearchService/trademarkNameSearchInfo",
+  ];
+
+  for (const baseUrl of baseUrls) {
+    console.log(`🌐 [SERVER] Trying name search URL: ${baseUrl}`);
+    
+    try {
+      let url = `${baseUrl}?accessKey=${kiprisKey}`;
+      url += `&trademarkName=${encodeURIComponent(trademark)}`;
+
+      console.log(`📡 [SERVER] Name search URL: ${url}`);
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => {
+        console.log(`⏰ [SERVER] Request timeout for KIPRIS name search`);
+        controller.abort();
+      }, 60000); // 60초 타임아웃
+
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "application/xml, text/xml, */*",
+          "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+          "Accept-Encoding": "gzip, deflate, br",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+          "Upgrade-Insecure-Requests": "1"
+        },
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      console.log(`📡 [SERVER] Name search response status: ${response.status}`);
+
+      if (!response.ok) {
+        console.error(`❌ [SERVER] Name search HTTP error: ${response.status}`);
+        continue;
+      }
+
+      const xmlText = await response.text();
+      // Name search XML 응답 수신됨
+
+      if (!xmlText || xmlText.length < 50) {
+        console.warn(`⚠️ [SERVER] Empty or too short name search response`);
+        continue;
+      }
+
+      // XML 파싱 및 데이터 추출 (상표명 검색용)
+      const items = parseKiprisXMLForNameSearch(xmlText);
+      console.log(`📊 [SERVER] Parsed ${items.length} items from name search XML`);
+
+      if (items.length > 0) {
+        allResults.push(...items);
+        console.log(`✅ [SERVER] Name search got ${items.length} results`);
+        break; // 첫 번째 URL에서 결과를 얻으면 충분
+      }
+
+      // API 호출 간격 (필요시)
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    } catch (error) {
+      console.error(`❌ [SERVER] Name search request failed:`, error);
+
+      if (error instanceof Error && error.name === "AbortError") {
+        console.error(`⏰ [SERVER] Name search request timeout`);
+      }
+
+      continue; // 다음 URL 시도
+    }
+  }
+
+  console.log(`📊 [SERVER] Name search summary: ${allResults.length} total results`);
+  return allResults;
+}
+
+/**
+ * 🚀 자유 검색용 XML 파싱 함수
+ */
+function parseKiprisXMLForFreeSearch(xmlText: string): KiprisTrademarkInfo[] {
+  try {
+    console.log("🔍 [SERVER] Parsing KIPRIS Free Search XML response...")
+
+    const items: KiprisTrademarkInfo[] = []
+
+    // 응답 코드 확인
+    const resultCodeMatch = xmlText.match(/<resultCode>(.*?)<\/resultCode>/)
+    const resultMsgMatch = xmlText.match(/<resultMsg>(.*?)<\/resultMsg>/)
+
+    if (resultCodeMatch) {
+      const resultCode = resultCodeMatch[1]
+      const resultMsg = resultMsgMatch ? resultMsgMatch[1] : ""
+      console.log(`📋 [SERVER] Free Search Response - Code: "${resultCode}", Message: "${resultMsg}"`)
+
+      if (resultCode && resultCode !== "00" && resultCode.trim() !== "") {
+        throw new Error(`KIPRIS Free Search API returned error code: ${resultCode}, message: ${resultMsg}`)
+      }
+    }
+
+    // 총 검색 결과 수 확인
+    const totalCountMatch = xmlText.match(/<TotalSearchCount>(.*?)<\/TotalSearchCount>/)
+    const totalCount = totalCountMatch ? totalCountMatch[1] : "0"
+    console.log(`📊 [SERVER] Free Search total count: ${totalCount}`)
+
+    // TradeMarkInfo 블록들 추출
+    const trademarkRegex = /<TradeMarkInfo>([\s\S]*?)<\/TradeMarkInfo>/g
+    const trademarkMatches = xmlText.match(trademarkRegex)
+
+    if (!trademarkMatches) {
+      console.warn("⚠️ [SERVER] No TradeMarkInfo found in Free Search XML")
+      return items
+    }
+
+    console.log(`📊 [SERVER] Found ${trademarkMatches.length} TradeMarkInfo records in Free Search`)
+
+    for (const trademarkXml of trademarkMatches) {
+      try {
+        const trademarkInfo: KiprisTrademarkInfo = {
+          serialNumber: extractXMLValue(trademarkXml, "SerialNumber"),
+          applicationNumber: extractXMLValue(trademarkXml, "ApplicationNumber"),
+          appReferenceNumber: extractXMLValue(trademarkXml, "AppReferenceNumber"),
+          applicationDate: formatDate(extractXMLValue(trademarkXml, "ApplicationDate")),
+          publicNumber: extractXMLValue(trademarkXml, "PublicNumber"),
+          publicDate: formatDate(extractXMLValue(trademarkXml, "PublicDate")),
+          registrationPublicNumber: extractXMLValue(trademarkXml, "RegistrationPublicNumber"),
+          registrationPublicDate: formatDate(extractXMLValue(trademarkXml, "RegistrationPublicDate")),
+          registrationNumber: extractXMLValue(trademarkXml, "RegistrationNumber"),
+          regReferenceNumber: extractXMLValue(trademarkXml, "RegReferenceNumber"),
+          registrationDate: formatDate(extractXMLValue(trademarkXml, "RegistrationDate")),
+          priorityClaimNumber: extractXMLValue(trademarkXml, "PriorityClaimNumber"),
+          priorityClaimDate: formatDate(extractXMLValue(trademarkXml, "PriorityClaimDate")),
+          internationalRegisterNumber: extractXMLValue(trademarkXml, "InternationalRegisterNumber"),
+          internationalRegisterDate: formatDate(extractXMLValue(trademarkXml, "InternationalRegisterDate")),
+          applicationStatus: extractXMLValue(trademarkXml, "ApplicationStatus"),
+          goodsClassificationCode: extractXMLValue(trademarkXml, "GoodClassificationCode"),
+          applicantName: extractXMLValue(trademarkXml, "ApplicantName"),
+          agentName: extractXMLValue(trademarkXml, "AgentName"),
+          registrationRightholderName: extractXMLValue(trademarkXml, "RegistrationRightholderName"),
+          title: extractXMLValue(trademarkXml, "Title"),
+          fulltextExistFlag: extractXMLValue(trademarkXml, "FulltextExistFlag"),
+          imagePath: extractXMLValue(trademarkXml, "ImagePath"),
+          thumbnailPath: extractXMLValue(trademarkXml, "ThumbnailPath"),
+        }
+
+        // 이미지 경로 처리 (로그 생략)
+        if (trademarkInfo.title && trademarkInfo.title.trim()) {
+          items.push(trademarkInfo)
+        }
+      } catch (itemError) {
+        console.warn("⚠️ [SERVER] Error parsing individual Free Search trademark item:", itemError)
+        continue
+      }
+    }
+
+    console.log(`✅ [SERVER] Successfully parsed ${items.length} Free Search trademark items`)
+    return items
+  } catch (error) {
+    console.error("❌ [SERVER] Error parsing Free Search KIPRIS XML:", error)
+    return []
+  }
+}
+
+/**
+ * 🚀 상표명 검색용 XML 파싱 함수
+ */
+function parseKiprisXMLForNameSearch(xmlText: string): KiprisTrademarkInfo[] {
+  // 상표명 검색의 XML 구조는 자유 검색과 동일하므로 같은 함수 사용
+  console.log("🔍 [SERVER] Parsing KIPRIS Name Search XML response...")
+  return parseKiprisXMLForFreeSearch(xmlText)
+}
+
+function parseKiprisXMLImproved(xmlText: string): KiprisTrademarkInfo[] {
+  try {
+    console.log("🔍 [SERVER] Parsing KIPRIS XML response...")
+
+    // 간단한 정규식 기반 XML 파싱
+    const items: KiprisTrademarkInfo[] = []
+
+    // 응답 코드 확인
+    const resultCodeMatch = xmlText.match(/<resultCode>(.*?)<\/resultCode>/)
+    const resultMsgMatch = xmlText.match(/<resultMsg>(.*?)<\/resultMsg>/)
+
+    if (resultCodeMatch) {
+      const resultCode = resultCodeMatch[1]
+      const resultMsg = resultMsgMatch ? resultMsgMatch[1] : ""
+      console.log(`📋 [SERVER] KIPRIS Response - Code: "${resultCode}", Message: "${resultMsg}"`)
+
+      // resultCode가 "00"이거나 빈 문자열일 때 정상으로 처리
+      if (resultCode && resultCode !== "00" && resultCode.trim() !== "") {
+        throw new Error(`KIPRIS API returned error code: ${resultCode}, message: ${resultMsg}`)
+      }
+    }
+
+    // 총 검색 결과 수 확인
+    const totalCountMatch = xmlText.match(/<TotalSearchCount>(.*?)<\/TotalSearchCount>/)
+    const totalCount = totalCountMatch ? totalCountMatch[1] : "0"
+    console.log(`📊 [SERVER] Total search count from KIPRIS: ${totalCount}`)
+
+    // item 블록들 추출 (실제 키프리스 API 응답 구조)
+    const itemRegex = /<item>([\s\S]*?)<\/item>/g
+    const itemMatches = xmlText.match(itemRegex)
+
+    if (!itemMatches) {
+      console.warn("⚠️ [SERVER] No item found in XML")
+      return items
+    }
+
+    console.log(`📊 [SERVER] Found ${itemMatches.length} trademark records`)
+
+    for (const trademarkXml of itemMatches) {
+      try {
+        const trademarkInfo: KiprisTrademarkInfo = {
+          serialNumber: extractXMLValue(trademarkXml, "indexNo"),
+          applicationNumber: extractXMLValue(trademarkXml, "applicationNumber"),
+          appReferenceNumber: extractXMLValue(trademarkXml, "appReferenceNumber"),
+          applicationDate: formatDate(extractXMLValue(trademarkXml, "applicationDate")),
+          publicNumber: extractXMLValue(trademarkXml, "publicNumber"),
+          publicDate: formatDate(extractXMLValue(trademarkXml, "publicDate")),
+          registrationPublicNumber: extractXMLValue(trademarkXml, "registrationPublicNumber"),
+          registrationPublicDate: formatDate(extractXMLValue(trademarkXml, "registrationPublicDate")),
+          registrationNumber: extractXMLValue(trademarkXml, "registrationNumber"),
+          regReferenceNumber: extractXMLValue(trademarkXml, "regReferenceNumber"),
+          registrationDate: formatDate(extractXMLValue(trademarkXml, "registrationDate")),
+          priorityClaimNumber: extractXMLValue(trademarkXml, "priorityClaimNumber"),
+          priorityClaimDate: formatDate(extractXMLValue(trademarkXml, "priorityClaimDate")),
+          internationalRegisterNumber: extractXMLValue(trademarkXml, "internationalRegisterNumber"),
+          internationalRegisterDate: formatDate(extractXMLValue(trademarkXml, "internationalRegisterDate")),
+          applicationStatus: extractXMLValue(trademarkXml, "applicationStatus"),
+          goodsClassificationCode: extractXMLValue(trademarkXml, "classificationCode"),
+          applicantName: extractXMLValue(trademarkXml, "applicantName"),
+          agentName: extractXMLValue(trademarkXml, "agentName"),
+          registrationRightholderName: extractXMLValue(trademarkXml, "registrationRightholderName"),
+          title: extractXMLValue(trademarkXml, "title") || extractXMLValue(trademarkXml, "trademarkName"), // 실제 상표명
+          fulltextExistFlag: extractXMLValue(trademarkXml, "fullText"),
+          imagePath: extractXMLValue(trademarkXml, "bigDrawing"),
+          thumbnailPath: extractXMLValue(trademarkXml, "drawing"),
+        }
+
+        // 이미지 경로 처리 (로그 생략)
+        if (trademarkInfo.title && trademarkInfo.title.trim()) {
+          items.push(trademarkInfo)
+        }
+      } catch (itemError) {
+        console.warn("⚠️ [SERVER] Error parsing individual trademark item:", itemError)
+        continue
+      }
+    }
+
+    console.log(`✅ [SERVER] Successfully parsed ${items.length} trademark items`)
+    return items
+  } catch (error) {
+    console.error("❌ [SERVER] Error parsing KIPRIS XML:", error)
+    console.error("XML content preview:", xmlText.substring(0, 1000))
+    throw error
+  }
+}
+
+// 정규식을 사용한 XML 값 추출 함수
+function extractXMLValue(xmlText: string, tagName: string): string {
+  const regex = new RegExp(`<${tagName}>(.*?)<\/${tagName}>`, "s")
+  const match = xmlText.match(regex)
+  return match ? match[1].trim() : ""
+}
+
+// 날짜 포맷팅 함수 (YYYYMMDD -> YYYY-MM-DD)
+function formatDate(dateStr: string): string {
+  if (!dateStr || dateStr.length !== 8) return dateStr
+  const year = dateStr.substring(0, 4)
+  const month = dateStr.substring(4, 6)
+  const day = dateStr.substring(6, 8)
+  return `${year}-${month}-${day}`
+}
+
+function analyzeKiprisResults(
+  results: KiprisTrademarkInfo[],
+  searchTrademark: string,
+  productClassificationCodes: string[],
+  similarGroupCodes: string[],
+  designatedProducts: string[],
+  searchTimestamp: string,
+): KiprisSearchResult {
+  console.log(`🔍 [SERVER] Analyzing ${results.length} results with classification codes: ${productClassificationCodes.join(", ")}`);
+
+  // 유사도 계산 및 카운트
+  let relevantClassificationCount = 0;
+  let registeredCount = 0;
+  let highSimilarityCount = 0;
+  let mediumSimilarityCount = 0;
+  let rejectedCount = 0;
+
+  results.forEach(item => {
+    // 1. 각 항목의 유사도 점수 계산 및 저장
+    const similarity = calculateSimilarity(searchTrademark, item.title || "");
+    item.similarityScore = similarity;
+
+    // 2. 유사도에 따라 카운트
+    if (similarity >= 0.8) {
+      highSimilarityCount++;
+    } else if (similarity >= 0.6) {
+      mediumSimilarityCount++;
+    }
+
+    // 3. 관련 분류 코드 카운트
+    const itemClassifications = item.goodsClassificationCode?.split(/[,|;]/).map(c => c.trim()) || [];
+    if (productClassificationCodes.some(code => itemClassifications.includes(code))) {
+      relevantClassificationCount++;
+    }
+
+    // 4. 등록된 상표 카운트
+    const status = item.applicationStatus?.toUpperCase() || "";
+    if (status.includes("등록") || status.includes("REGISTERED")) {
+      registeredCount++;
+    }
+
+    // 5. 거절된 상표 카운트
+    if (status.includes("거절") || status.includes("REJECTED") || status.includes("거부")) {
+      rejectedCount++;
+    }
+  });
+
+  // 위험도 점수 계산
+  let riskScore = 0;
+  // 관련 분류 코드 가중치
+  riskScore += relevantClassificationCount * 1.5;
+  // 높은 유사도 가중치
+  riskScore += highSimilarityCount * 2;
+  // 중간 유사도 가중치
+  riskScore += mediumSimilarityCount * 1;
+  // 등록된 상표 가중치
+  riskScore += registeredCount * 1;
+  // 거절된 상표 가중치 (거절 사유 분석을 위해)
+  riskScore += rejectedCount * 0.5;
+
+  // 위험도 수준 결정 (0~100 사이로 조정)
+  const finalRiskScore = Math.min(100, Math.round(riskScore));
+  
+  let riskLevel: "low" | "medium" | "high";
+  if (finalRiskScore > 70) {
+    riskLevel = "high";
+  } else if (finalRiskScore > 40) {
+    riskLevel = "medium";
+  } else {
+    riskLevel = "low";
+  }
+
+  // 유사군/분류 가중치 기반 랭킹
+  const weightedResults = results.map(item => {
+    let weight = (item.similarityScore || 0);
+    // 유사군 일치 시 큰 가중치
+    const matched = item.matchedSimilarCodes && similarGroupCodes && item.matchedSimilarCodes.some(c => similarGroupCodes.includes(c));
+    if (matched) weight += 30; // 가중치 튜닝 포인트
+    // 니스분류 일치 시 중간 가중치
+    const itemClasses = item.goodsClassificationCode?.split(/[,|;]/).map(c => c.trim()) || [];
+    if (productClassificationCodes.some(code => itemClasses.includes(code))) weight += 15;
+    return { item, weight };
+  });
+
+  const topResults = weightedResults
+    .sort((a, b) => b.weight - a.weight)
+    .slice(0, 20)
+    .map(w => w.item);
+
+  return {
+    total: results.length,
+    items: topResults,
+    sameIndustryCount: relevantClassificationCount, // 여기서는 관련 분류 코드로 대체
+    riskScore: finalRiskScore,
+    riskLevel,
+    searchQuery: searchTrademark,
+    searchTimestamp: searchTimestamp,
+  };
+}
+
+/**
+ * 거절된 상표들의 거절 사유를 병렬로 가져오는 함수
+ */
+export async function fetchRejectionReasonsForRejectedTrademarks(
+  trademarks: KiprisTrademarkInfo[]
+): Promise<KiprisTrademarkInfo[]> {
+  console.log(`🔍 [KIPRIS] Starting to fetch rejection reasons for ${trademarks.length} trademarks`);
+  
+  // 거절된 상표들만 필터링
+  const rejectedTrademarks = trademarks.filter(trademark => 
+    trademark.applicationStatus && (
+      trademark.applicationStatus.includes("거절") || 
+      trademark.applicationStatus.includes("REJECTED") || 
+      trademark.applicationStatus.includes("거부")
+    )
+  );
+  
+  console.log(`🔍 [KIPRIS] Found ${rejectedTrademarks.length} rejected trademarks`);
+  
+  if (rejectedTrademarks.length === 0) {
+    console.log(`ℹ️ [KIPRIS] No rejected trademarks found`);
+    return trademarks;
+  }
+  
+  // 거절된 상표들에 대해 거절 사유 처리
+  const updatedTrademarks = await Promise.all(trademarks.map(async (trademark) => {
+    if (trademark.applicationStatus && (
+      trademark.applicationStatus.includes("거절") || 
+      trademark.applicationStatus.includes("REJECTED") || 
+      trademark.applicationStatus.includes("거부")
+    )) {
+      let rejectionReason = "";
+      let rejectionReasonSummary = "";
+      let legalGround = trademark.applicationStatus;
+      let docName = "거절결정서";
+      
+      // 1. API에서 실제 거절 사유 가져오기 시도 (키프리스 플러스 구매 후 사용)
+      if (trademark.applicationNumber) {
+        try {
+          console.log(`🔍 [KIPRIS] Attempting to fetch actual rejection reason for: ${trademark.title} (${trademark.applicationNumber})`);
+          const apiResult = await getDecisionMatterInfo(trademark.applicationNumber);
+          
+          if (apiResult.success && apiResult.data) {
+            console.log(`✅ [KIPRIS] Successfully fetched actual rejection reason for: ${trademark.title}`);
+            rejectionReason = apiResult.data.rejectionReason || "";
+            rejectionReasonSummary = apiResult.data.rejectionReasonSummary || "";
+            legalGround = apiResult.data.legalGround || trademark.applicationStatus;
+            docName = apiResult.data.docName || "거절이유통지서";
+            
+            // 추가된 상세 정보들도 저장
+            const rejectionInfo = {
+              rejectionDate: apiResult.data.rejectionDate,
+              rejectionReasons: apiResult.data.rejectionDetails?.rejectionReasons || 
+                               (apiResult.data.rejectionReason ? [apiResult.data.rejectionReason] : []),
+              decisionNumber: apiResult.data.decisionNumber,
+              appealStatus: apiResult.data.appealStatus,
+              finalDecision: apiResult.data.finalDecision,
+            };
+            
+            return {
+              ...trademark,
+              rejectionReason,
+              rejectionReasonSummary,
+              legalGround,
+              docName,
+              rejectionInfo,
+              // 추가된 상세 정보들
+              pdfFileUrl: apiResult.data.pdfFileUrl,
+            };
+          } else {
+            console.log(`⚠️ [KIPRIS] Failed to fetch actual rejection reason for: ${trademark.title}, using inference`);
+          }
+        } catch (error) {
+          console.log(`⚠️ [KIPRIS] Error fetching actual rejection reason for: ${trademark.title}, using inference`);
+        }
+      }
+      
+      // 2. API에서 가져오지 못한 경우 추론 로직 사용
+      if (!rejectionReason) {
+        console.log(`🔍 [KIPRIS] Using inference for rejection reason: ${trademark.title}`);
+        rejectionReason = inferRejectionReason(trademark);
+        rejectionReasonSummary = summarizeRejectionReason(rejectionReason, trademark.applicationStatus);
+      }
+      
+      return {
+        ...trademark,
+        rejectionReason,
+        rejectionReasonSummary,
+        legalGround,
+        docName,
+        rejectionInfo: {
+          rejectionDate: trademark.applicationDate,
+          rejectionReasons: [rejectionReason],
+          decisionNumber: trademark.applicationNumber,
+          appealStatus: "거절",
+          finalDecision: "거절"
+        }
+      };
+    }
+    return trademark;
+  }));
+  
+  console.log(`✅ [KIPRIS] Updated ${rejectedTrademarks.length} trademarks with rejection reasons`);
+  return updatedTrademarks;
+}
+
+/**
+ * 상표 정보를 기반으로 거절 사유를 추론하는 함수
+ */
+function inferRejectionReason(trademark: KiprisTrademarkInfo): string {
+  const reasons: string[] = [];
+  
+  // 1. 유사 상표와의 충돌 가능성
+  if (trademark.similarityScore && trademark.similarityScore > 70) {
+    reasons.push("기존 등록 상표와의 유사성으로 인한 거절");
+  }
+  
+  // 2. 상품 분류 관련
+  if (trademark.goodsClassificationCode) {
+    reasons.push("상품 분류 불일치로 인한 거절");
+  }
+  
+  // 3. 출원인 정보 관련
+  if (!trademark.applicantName || trademark.applicantName.trim() === "") {
+    reasons.push("출원인 정보 부족으로 인한 거절");
+  }
+  
+  // 4. 상표명 관련
+  if (trademark.title) {
+    if (trademark.title.length < 2) {
+      reasons.push("상표명이 너무 짧아 식별력이 부족함");
+    } else if (trademark.title.includes("일반적인") || trademark.title.includes("설명적")) {
+      reasons.push("상표명이 일반적이거나 설명적이어서 식별력이 부족함");
+    }
+  }
+  
+  // 5. 기본 거절 사유 (추론이 어려운 경우)
+  if (reasons.length === 0) {
+    reasons.push("상표법 제7조에 따른 거절 사유");
+  }
+  
+  return reasons.join("; ");
+}
+
+function calculateSimilarity(str1: string, str2: string): number {
+  if (!str1 || !str2) return 0;
+
+  const s1 = str1.toLowerCase().trim();
+  const s2 = str2.toLowerCase().trim();
+
+  if (s1 === s2) return 100;
+
+  // 정확한 포함 관계 확인
+  if (s1.includes(s2) || s2.includes(s1)) {
+    const longer = s1.length > s2.length ? s1 : s2;
+    const shorter = s1.length <= s2.length ? s1 : s2;
+    return Math.round((shorter.length / longer.length) * 90);
+  }
+
+  // 레벤슈타인 거리 기반 유사도
+  const levenshteinSimilarity = 1 - levenshteinDistance(s1, s2) / Math.max(s1.length, s2.length);
+
+  // 자카드 유사도
+  const jaccardSimilarity = calculateJaccardSimilarity(s1, s2);
+
+  // 가중 평균 계산
+  const similarity = (levenshteinSimilarity * 0.6 + jaccardSimilarity * 0.4) * 100;
+
+  return Math.round(Math.min(100, Math.max(0, similarity)));
+}
+
+function levenshteinDistance(str1: string, str2: string): number {
+  const matrix = Array(str2.length + 1)
+    .fill(null)
+    .map(() => Array(str1.length + 1).fill(null));
+
+  for (let i = 0; i <= str1.length; i++) matrix[0][i] = i;
+  for (let j = 0; j <= str2.length; j++) matrix[j][0] = j;
+
+  for (let j = 1; j <= str2.length; j++) {
+    for (let i = 1; i <= str1.length; i++) {
+      const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1;
+      matrix[j][i] = Math.min(matrix[j][i - 1] + 1, matrix[j - 1][i] + 1, matrix[j - 1][i - 1] + indicator);
+    }
+  }
+
+  return matrix[str2.length][str1.length];
+}
+
+function calculateJaccardSimilarity(str1: string, str2: string): number {
+  const set1 = new Set(str1.toLowerCase().split(''));
+  const set2 = new Set(str2.toLowerCase().split(''));
+  
+  const intersection = new Set([...set1].filter(x => set2.has(x)));
+  const union = new Set([...set1, ...set2]);
+  
+  return intersection.size / union.size;
+}
+
+/**
+ * KIPRIS 법적 상태 이력 조회 함수
+ * 상표의 거절 사유, 결정 사항, 특허거절결정 등의 상세 정보를 조회합니다.
+ */
+export async function getDecisionMatterInfo(
+  applicationNumber: string
+): Promise<{
+  success: boolean;
+  data?: {
+    rejectionReason?: string;
+    rejectionReasonSummary?: string;
+    legalGround?: string;
+    pdfFileUrl?: string;
+    docName?: string;
+    // 추가된 상세 정보
+    rejectionDate?: string;
+    decisionNumber?: string;
+    appealStatus?: string;
+    finalDecision?: string;
+    legalStatusHistory?: Array<{
+      legalStatusName: string;
+      legalStatusComment: string;
+      legalStatusDate: string;
+      legalStatusType: string;
+    }>;
+    rejectionDetails?: {
+      rejectionType: string;
+      rejectionReasons: string[];
+      decisionAuthority: string;
+      appealDeadline?: string;
+      nextSteps?: string;
+    };
+  };
+  error?: string;
+}> {
+  // 법적 상태 이력용 API 키 우선 사용
+  const kiprisKey = process.env.KIPRIS_LEGAL_API_KEY || process.env.KIPRIS_API_KEY;
+  if (!kiprisKey) {
+    console.error("❌ [SERVER] KIPRIS_LEGAL_API_KEY or KIPRIS_API_KEY is missing");
+    throw new Error("KIPRIS API key is not set");
+  }
+
+  // 출원번호 형식 정리 (하이픈 제거, 공백 제거)
+  const cleanApplicationNumber = applicationNumber.replace(/[-\s]/g, "");
+  
+  // 출원번호 길이 확인 (일반적으로 13자리)
+  if (cleanApplicationNumber.length !== 13) {
+    console.warn(`⚠️ [KIPRIS] Application number length is ${cleanApplicationNumber.length}, expected 13: ${applicationNumber}`);
+  }
+
+  // 키프리스 법적 상태 이력 API 사용
+  const url = `http://plus.kipris.or.kr/kipo-api/kipi/legStatusInfoSearchService/getLegStatusHistoryInfoSearch?applicationNumber=${cleanApplicationNumber}&ServiceKey=${kiprisKey}`;
+
+  console.log(`🔍 [KIPRIS] Calling getLegStatusHistoryInfoSearch for applicationNumber: ${applicationNumber}`);
+  console.log(`🔍 [KIPRIS] Cleaned applicationNumber: ${cleanApplicationNumber}`);
+  console.log(`🔍 [KIPRIS] URL: ${url.replace(kiprisKey, '***')}`);
+
+  try {
+    const response = await fetch(url);
+    console.log(`🔍 [KIPRIS] Response status: ${response.status} ${response.statusText}`);
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    const xmlText = await response.text();
+    console.log(`🔍 [KIPRIS] XML response length: ${xmlText.length}`);
+    console.log(`🔍 [KIPRIS] XML response preview: ${xmlText.substring(0, 500)}...`);
+
+    // XML 응답에서 successYN 확인
+    const successMatch = xmlText.match(/<successYN>([^<]*)<\/successYN>/);
+    const resultCodeMatch = xmlText.match(/<resultCode>([^<]*)<\/resultCode>/);
+    const resultMsgMatch = xmlText.match(/<resultMsg>([^<]*)<\/resultMsg>/);
+
+    if (successMatch && successMatch[1] === 'N') {
+      console.warn(`⚠️ [KIPRIS] API returned successYN=N, resultCode: ${resultCodeMatch?.[1]}, resultMsg: ${resultMsgMatch?.[1]}`);
+      return {
+        success: false,
+        error: `API Error: ${resultMsgMatch?.[1] || 'Unknown error'} (Code: ${resultCodeMatch?.[1] || 'Unknown'})`
+      };
+    }
+
+    // 전체 법적 상태 이력 수집
+    const legalStatusHistory = [];
+    const itemMatches = xmlText.match(/<item>([\s\S]*?)<\/item>/g);
+    
+    if (itemMatches) {
+      for (const itemXml of itemMatches) {
+        const legalStatusName = extractXMLValue(itemXml, "legalStatusName");
+        const legalStatusComment = extractXMLValue(itemXml, "legalStatusComment");
+        const legalStatusDate = extractXMLValue(itemXml, "legalStatusDate");
+        const legalStatusType = extractXMLValue(itemXml, "legalStatusType");
+        
+        if (legalStatusName) {
+          legalStatusHistory.push({
+            legalStatusName,
+            legalStatusComment,
+            legalStatusDate,
+            legalStatusType
+          });
+        }
+      }
+    }
+
+    console.log(`🔍 [KIPRIS] Found ${legalStatusHistory.length} legal status items`);
+
+    if (legalStatusHistory.length === 0) {
+      return {
+        success: false,
+        error: "법적 상태 이력을 찾을 수 없습니다."
+      };
+    }
+
+    // 거절 관련 항목들 찾기
+    const rejectionItems = legalStatusHistory.filter(item => 
+      item.legalStatusName && (
+        item.legalStatusName.includes("거절") || 
+        item.legalStatusName.includes("거부") ||
+        item.legalStatusName.includes("거절이유") ||
+        item.legalStatusName.includes("거절결정") ||
+        item.legalStatusName.includes("특허거절") ||
+        item.legalStatusName.includes("거절통지") ||
+        item.legalStatusName.includes("거절사유")
+      )
+    );
+
+    console.log(`🔍 [KIPRIS] Found ${rejectionItems.length} rejection-related items`);
+
+    // 가장 최근 거절 사유 찾기
+    const latestRejection = rejectionItems.length > 0 
+      ? rejectionItems.sort((a, b) => 
+          (b.legalStatusDate || "").localeCompare(a.legalStatusDate || "")
+        )[0]
+      : null;
+
+    // 거절 사유를 한 줄로 요약
+    const rejectionReasonSummary = latestRejection 
+      ? summarizeRejectionReason(latestRejection.legalStatusComment, latestRejection.legalStatusName)
+      : "거절 관련 정보 없음";
+
+    // 거절 상세 정보 분석
+    const rejectionDetails = analyzeRejectionDetails(rejectionItems, legalStatusHistory);
+
+    // 결정 번호 찾기
+    const decisionNumber = extractDecisionNumber(xmlText) || 
+                          extractDecisionNumberFromHistory(legalStatusHistory) || 
+                          undefined;
+
+    // 항소 상태 확인
+    const appealStatus = determineAppealStatus(legalStatusHistory);
+
+    // 최종 결정 확인
+    const finalDecision = determineFinalDecision(legalStatusHistory);
+
+    return {
+      success: true,
+      data: {
+        rejectionReason: latestRejection?.legalStatusComment,
+        rejectionReasonSummary,
+        legalGround: latestRejection?.legalStatusName,
+        pdfFileUrl: "", // 이 API에서는 PDF URL을 제공하지 않음
+        docName: latestRejection?.legalStatusName || "법적 상태 이력",
+        rejectionDate: latestRejection?.legalStatusDate,
+        decisionNumber,
+        appealStatus,
+        finalDecision,
+        legalStatusHistory,
+        rejectionDetails,
+      },
+    };
+
+  } catch (error) {
+    console.error(
+      `❌ [KIPRIS] Error fetching legal status history for ${applicationNumber}:`,
+      error
+    );
+    return {
+      success: false,
+      error:
+        error instanceof Error ? error.message : "Unknown error occurred",
+    };
+  }
+}
+
+/**
+ * 거절 상세 정보를 분석하는 함수
+ */
+function analyzeRejectionDetails(
+  rejectionItems: Array<{
+    legalStatusName: string;
+    legalStatusComment: string;
+    legalStatusDate: string;
+    legalStatusType: string;
+  }>,
+  legalStatusHistory: Array<{
+    legalStatusName: string;
+    legalStatusComment: string;
+    legalStatusDate: string;
+    legalStatusType: string;
+  }>
+): {
+  rejectionType: string;
+  rejectionReasons: string[];
+  decisionAuthority: string;
+  appealDeadline?: string;
+  nextSteps?: string;
+} {
+  const rejectionReasons: string[] = [];
+  let rejectionType = "일반거절";
+  let decisionAuthority = "특허청";
+  let appealDeadline: string | undefined;
+  let nextSteps: string | undefined;
+
+  // 거절 사유들 수집
+  rejectionItems.forEach(item => {
+    if (item.legalStatusComment && item.legalStatusComment.trim()) {
+      rejectionReasons.push(item.legalStatusComment.trim());
+    }
+  });
+
+  // 거절 유형 판단
+  if (rejectionItems.some(item => item.legalStatusName.includes("특허거절"))) {
+    rejectionType = "특허거절";
+  } else if (rejectionItems.some(item => item.legalStatusName.includes("거절결정"))) {
+    rejectionType = "거절결정";
+  } else if (rejectionItems.some(item => item.legalStatusName.includes("거절이유"))) {
+    rejectionType = "거절이유통지";
+  }
+
+  // 결정 기관 판단
+  if (rejectionItems.some(item => item.legalStatusName.includes("특허심판원"))) {
+    decisionAuthority = "특허심판원";
+  } else if (rejectionItems.some(item => item.legalStatusName.includes("법원"))) {
+    decisionAuthority = "법원";
+  }
+
+  // 항소 기한 계산 (거절일로부터 30일)
+  const latestRejection = rejectionItems.sort((a, b) => 
+    (b.legalStatusDate || "").localeCompare(a.legalStatusDate || "")
+  )[0];
+
+  if (latestRejection?.legalStatusDate) {
+    try {
+      // 날짜 정규화: 지원 형식 예) YYYYMMDD, YYYY-MM-DD, YYYY/MM/DD
+      let raw = (latestRejection.legalStatusDate || '').trim();
+      const m = raw.match(/^(\d{4})[-\/]?(\d{2})[-\/]?(\d{2})$/);
+      if (m) {
+        raw = `${m[1]}-${m[2]}-${m[3]}`; // ISO 호환
+      }
+
+      const rejectionDate = new Date(raw);
+      if (!isNaN(rejectionDate.getTime())) {
+        const appealDate = new Date(rejectionDate);
+        appealDate.setDate(appealDate.getDate() + 30);
+        appealDeadline = appealDate.toISOString().split('T')[0];
+      } else {
+        console.warn("⚠️ [KIPRIS] Invalid legalStatusDate format:", latestRejection.legalStatusDate);
+      }
+    } catch (error) {
+      console.warn("⚠️ [KIPRIS] Failed to calculate appeal deadline:", error);
+    }
+  }
+
+  // 다음 단계 제안
+  if (rejectionItems.length > 0) {
+    nextSteps = "거절이유에 대한 의견서 제출 또는 항소심 청구를 고려하세요.";
+  }
+
+  return {
+    rejectionType,
+    rejectionReasons,
+    decisionAuthority,
+    appealDeadline,
+    nextSteps
+  };
+}
+
+/**
+ * XML에서 결정 번호를 추출하는 함수
+ */
+function extractDecisionNumber(xmlText: string): string | null {
+  const decisionNumberMatch = xmlText.match(/<decisionNumber>([^<]*)<\/decisionNumber>/);
+  return decisionNumberMatch ? decisionNumberMatch[1].trim() : null;
+}
+
+/**
+ * 법적 상태 이력에서 결정 번호를 추출하는 함수
+ */
+function extractDecisionNumberFromHistory(
+  legalStatusHistory: Array<{
+    legalStatusName: string;
+    legalStatusComment: string;
+    legalStatusDate: string;
+    legalStatusType: string;
+  }>
+): string | null {
+  for (const item of legalStatusHistory) {
+    // 결정 번호 패턴 찾기 (예: 2023-1234, 2023년1234호 등)
+    const decisionNumberMatch = item.legalStatusComment?.match(/(\d{4}[-년]\d{1,4}[호]?)/);
+    if (decisionNumberMatch) {
+      return decisionNumberMatch[1];
+    }
+  }
+  return null;
+}
+
+/**
+ * 항소 상태를 판단하는 함수
+ */
+function determineAppealStatus(
+  legalStatusHistory: Array<{
+    legalStatusName: string;
+    legalStatusComment: string;
+    legalStatusDate: string;
+    legalStatusType: string;
+  }>
+): string {
+  const hasAppeal = legalStatusHistory.some(item => 
+    item.legalStatusName.includes("항소") || 
+    item.legalStatusName.includes("심판") ||
+    item.legalStatusName.includes("재심")
+  );
+
+  const hasFinalDecision = legalStatusHistory.some(item =>
+    item.legalStatusName.includes("최종") ||
+    item.legalStatusName.includes("확정") ||
+    item.legalStatusName.includes("종료")
+  );
+
+  if (hasFinalDecision) {
+    return "최종결정완료";
+  } else if (hasAppeal) {
+    return "항소진행중";
+  } else {
+    return "항소미제기";
+  }
+}
+
+/**
+ * 최종 결정을 판단하는 함수
+ */
+function determineFinalDecision(
+  legalStatusHistory: Array<{
+    legalStatusName: string;
+    legalStatusComment: string;
+    legalStatusDate: string;
+    legalStatusType: string;
+  }>
+): string {
+  const latestItem = legalStatusHistory.sort((a, b) => 
+    (b.legalStatusDate || "").localeCompare(a.legalStatusDate || "")
+  )[0];
+
+  if (!latestItem) {
+    return "정보없음";
+  }
+
+  if (latestItem.legalStatusName.includes("등록")) {
+    return "등록결정";
+  } else if (latestItem.legalStatusName.includes("거절")) {
+    return "거절결정";
+  } else if (latestItem.legalStatusName.includes("취하")) {
+    return "취하";
+  } else if (latestItem.legalStatusName.includes("무효")) {
+    return "무효결정";
+  } else {
+    return latestItem.legalStatusName;
+  }
+}
+
+/**
+ * 거절 사유를 한 줄로 요약하는 함수
+ */
+function summarizeRejectionReason(rejectionReason?: string, legalGround?: string): string {
+  if (!rejectionReason && !legalGround) {
+    return "거절 사유 정보 없음";
+  }
+
+  // 실제 키프리스 API에서 가져온 거절 사유를 그대로 사용
+  if (rejectionReason && rejectionReason.trim()) {
+    // 거절 사유가 있으면 첫 번째 문장만 추출하여 요약
+    const firstSentence = rejectionReason.split(/[.!?]/)[0].trim();
+    if (firstSentence.length > 0) {
+      return firstSentence.length > 100 ? firstSentence.substring(0, 100) + "..." : firstSentence;
+    }
+  }
+
+  // 거절 사유가 없고 법적 근거만 있는 경우
+  if (legalGround && legalGround.trim()) {
+    const firstSentence = legalGround.split(/[.!?]/)[0].trim();
+    if (firstSentence.length > 0) {
+      return firstSentence.length > 100 ? firstSentence.substring(0, 100) + "..." : firstSentence;
+    }
+  }
+
+  // 둘 다 없는 경우
+  return "거절 사유 정보 없음";
+}
+
+/**
+ * KIPRIS 유사군 코드 조회 API
+ * 특정 출원번호에 대한 유사군 코드를 조회하여 Stage 1의 선택된 유사군 코드와 매칭
+ */
+export async function fetchTrademarkSimilarityCode(applicationNumber: string): Promise<string[]> {
+  if (!applicationNumber) {
+    throw new Error('출원번호가 필요합니다');
+  }
+
+  // 캐시 확인
+  const cacheKey = `similarity_${applicationNumber}`;
+  const cached = similarityCodeFetchCache.get(cacheKey);
+  
+  if (cached && Date.now() - cached.cachedAt < SIMILARITY_CACHE_TTL_MS) {
+    console.log('✅ [KIPRIS] Using cached similarity codes:', cached.codes);
+    return cached.codes;
+  }
+
+  console.log('🔍 [KIPRIS] Fetching similarity codes for application:', applicationNumber);
+
+  try {
+    // KIPRIS 유사군 코드 API 호출
+    const apiUrl = `http://plus.kipris.or.kr/openapi/rest/trademarkInfoSearchService/trademarkSimilarityCodeInfo`;
+    const params = new URLSearchParams({
+      applicationNumber: applicationNumber,
+      ServiceKey: process.env.KIPRIS_API_KEY || 'test'
+    });
+
+    const response = await fetch(`${apiUrl}?${params}`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/xml',
+        'User-Agent': 'IPDR-Analysis-System/1.0'
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`KIPRIS API 호출 실패: ${response.status} ${response.statusText}`);
+    }
+
+    const xmlText = await response.text();
+    console.log('📄 [KIPRIS] Raw similarity code XML response length:', xmlText.length);
+
+    // XML 파싱하여 상표 정보 추출
+    const trademarkInfos = parseSimilarityCodeXML(xmlText);
+    
+    // 유사군 코드 추출 (각 상표 정보에서 similarityCodes 필드 추출)
+    const similarityCodes: string[] = [];
+    for (const info of trademarkInfos) {
+      if (info.similarityCodes && info.similarityCodes.length > 0) {
+        similarityCodes.push(...info.similarityCodes);
+      }
+    }
+    
+    // 중복 제거
+    const uniqueCodes = [...new Set(similarityCodes)];
+    
+    // 캐시에 저장
+    similarityCodeFetchCache.set(cacheKey, {
+      codes: uniqueCodes,
+      cachedAt: Date.now()
+    });
+
+    console.log('✅ [KIPRIS] Similarity codes extracted:', uniqueCodes);
+    return uniqueCodes;
+
+  } catch (error) {
+    console.error('❌ [KIPRIS] Similarity code fetch error:', error);
+    
+    // 개발 환경에서는 모의 데이터 반환
+    if (process.env.NODE_ENV === 'development') {
+      const mockCodes = ['G0301', 'G0302', 'G0303']; // 모의 유사군 코드
+      console.log('🔧 [KIPRIS] Using mock similarity codes:', mockCodes);
+      return mockCodes;
+    }
+    
+    throw error;
+  }
+}
+
+/**
+ * 유사군 코드 매칭을 통한 결과 필터링
+ * Stage 1에서 선택된 유사군 코드와 KIPRIS 결과의 유사군 코드를 비교하여 관련성 높은 결과만 반환
+ */
+async function filterBySimilarityCode(
+  results: KiprisTrademarkInfo[], 
+  targetSimilarCodes: string[]
+): Promise<KiprisTrademarkInfo[]> {
+  if (!targetSimilarCodes || targetSimilarCodes.length === 0) {
+    console.log('🔍 [KIPRIS] No target similar codes provided, returning all results');
+    return results;
+  }
+
+  console.log(`🎯 [KIPRIS] Filtering ${results.length} results by similar codes:`, targetSimilarCodes);
+  
+  const filteredResults: KiprisTrademarkInfo[] = [];
+  
+  for (const result of results) {
+    try {
+      // 각 결과에 대해 유사군 코드 조회
+      if (result.applicationNumber) {
+        const resultSimilarCodes = await fetchTrademarkSimilarityCode(result.applicationNumber);
+        
+        // 교집합 확인 (target 코드와 결과 코드 간 매칭)
+        const hasMatch = targetSimilarCodes.some(targetCode => 
+          resultSimilarCodes.some(resultCode => resultCode === targetCode)
+        );
+        
+        if (hasMatch) {
+          filteredResults.push({
+            ...result,
+            similarityCodes: resultSimilarCodes // 유사군 코드 정보 추가
+          });
+          console.log(`✅ [KIPRIS] Match found for ${result.title}: ${resultSimilarCodes.join(', ')}`);
+        } else {
+          console.log(`❌ [KIPRIS] No match for ${result.title}: ${resultSimilarCodes.join(', ')}`);
+        }
+      } else {
+        // 출원번호가 없는 경우 기본적으로 포함 (데이터 무결성)
+        filteredResults.push(result);
+        console.log(`⚠️ [KIPRIS] No application number for ${result.title}, including by default`);
+      }
+    } catch (error) {
+      console.error(`❌ [KIPRIS] Error fetching similarity codes for ${result.title}:`, error);
+      // 오류 발생 시 기본적으로 포함 (검색 결과 누락 방지)
+      filteredResults.push(result);
+    }
+  }
+  
+  console.log(`🎯 [KIPRIS] Similarity filtering complete: ${filteredResults.length}/${results.length} results matched`);
+  return filteredResults;
+}
+
+/**
+ * 결정사항 XML 파싱 함수
+ */
+function parseDecisionMatterXML(xmlText: string): {
+  rejectionDate?: string;
+  rejectionReasons?: string[];
+  decisionNumber?: string;
+  appealStatus?: string;
+  finalDecision?: string;
+  decisionDetails?: string;
+} {
+  try {
+    // XML에서 필요한 정보 추출
+    const rejectionDate = extractXMLValue(xmlText, 'rejectionDate');
+    const decisionNumber = extractXMLValue(xmlText, 'decisionNumber');
+    const appealStatus = extractXMLValue(xmlText, 'appealStatus');
+    const finalDecision = extractXMLValue(xmlText, 'finalDecision');
+    const decisionDetails = extractXMLValue(xmlText, 'decisionDetails');
+    
+    // 거절 사유 추출 (여러 개일 수 있음)
+    const rejectionReasons: string[] = [];
+    const reasonMatches = xmlText.match(/<rejectionReason>(.*?)<\/rejectionReason>/g);
+    if (reasonMatches) {
+      reasonMatches.forEach(match => {
+        const reason = match.replace(/<\/?rejectionReason>/g, '').trim();
+        if (reason) {
+          rejectionReasons.push(reason);
+        }
+      });
+    }
+    
+    return {
+      rejectionDate: rejectionDate || undefined,
+      rejectionReasons: rejectionReasons.length > 0 ? rejectionReasons : undefined,
+      decisionNumber: decisionNumber || undefined,
+      appealStatus: appealStatus || undefined,
+      finalDecision: finalDecision || undefined,
+      decisionDetails: decisionDetails || undefined
+    };
+    
+  } catch (error) {
+    console.error('❌ [KIPRIS] Error parsing decision matter XML:', error);
+    return {};
+  }
+}
+
+/**
+ * 거절 사유 XML 파싱 함수 (미리 구현)
+ * 웹 검색 결과의 XML 구조를 기반으로 함
+ */
+function parseRejectionReasonXML(xmlText: string): {
+  success: boolean;
+  data?: {
+    rejectionReason?: string;
+    rejectionReasonSummary?: string;
+    legalGround?: string;
+    rejectionDate?: string;
+    decisionNumber?: string;
+  };
+  error?: string;
+} {
+  try {
+    console.log(`🔍 [KIPRIS] Parsing rejection reason XML, length: ${xmlText.length}`);
+    
+    // XML 응답에서 successYN 확인
+    const successMatch = xmlText.match(/<successYN>([^<]*)<\/successYN>/);
+    const resultCodeMatch = xmlText.match(/<resultCode>([^<]*)<\/resultCode>/);
+    const resultMsgMatch = xmlText.match(/<resultMsg>([^<]*)<\/resultMsg>/);
+
+    if (successMatch && successMatch[1] === 'N') {
+      console.warn(`⚠️ [KIPRIS] XML returned successYN=N, resultCode: ${resultCodeMatch?.[1]}, resultMsg: ${resultMsgMatch?.[1]}`);
+      return {
+        success: false,
+        error: `API Error: ${resultMsgMatch?.[1] || 'Unknown error'} (Code: ${resultCodeMatch?.[1] || 'Unknown'})`
+      };
+    }
+
+    // 거절이유통지 항목 찾기
+    const rejectionItems = [];
+    const itemMatches = xmlText.match(/<item>([\s\S]*?)<\/item>/g);
+    
+    if (itemMatches) {
+      for (const itemXml of itemMatches) {
+        const legalStatusName = extractXMLValue(itemXml, "legalStatusName");
+        const legalStatusComment = extractXMLValue(itemXml, "legalStatusComment");
+        const legalStatusDate = extractXMLValue(itemXml, "legalStatusDate");
+        const applicationNumber = extractXMLValue(itemXml, "applicationNumber");
+        
+        // 거절이유통지 또는 거절 관련 상태 찾기
+        if (legalStatusName && (
+          legalStatusName.includes("거절") || 
+          legalStatusName.includes("거부") ||
+          legalStatusName.includes("거절이유") ||
+          legalStatusName.includes("거절결정")
+        )) {
+          rejectionItems.push({
+            legalStatusName,
+            legalStatusComment,
+            legalStatusDate,
+            applicationNumber
+          });
+        }
+      }
+    }
+
+    console.log(`🔍 [KIPRIS] Found ${rejectionItems.length} rejection-related items`);
+
+    if (rejectionItems.length === 0) {
+      return {
+        success: false,
+        error: "거절 관련 법적 상태를 찾을 수 없습니다."
+      };
+    }
+
+    // 가장 최근 거절 사유 사용
+    const latestRejection = rejectionItems.sort((a, b) => 
+      (b.legalStatusDate || "").localeCompare(a.legalStatusDate || "")
+    )[0];
+
+    console.log(`🔍 [KIPRIS] Latest rejection item:`);
+    console.log(`  - legalStatusName: ${latestRejection.legalStatusName}`);
+    console.log(`  - legalStatusDate: ${latestRejection.legalStatusDate}`);
+    console.log(`  - applicationNumber: ${latestRejection.applicationNumber}`);
+    console.log(`  - legalStatusComment: ${latestRejection.legalStatusComment ? latestRejection.legalStatusComment.substring(0, 100) + '...' : 'empty'}`);
+
+    // 거절 사유를 한 줄로 요약
+    const rejectionReasonSummary = summarizeRejectionReason(latestRejection.legalStatusComment, latestRejection.legalStatusName);
+
+    return {
+      success: true,
+      data: {
+        rejectionReason: latestRejection.legalStatusComment,
+        rejectionReasonSummary,
+        legalGround: latestRejection.legalStatusName,
+        rejectionDate: latestRejection.legalStatusDate,
+        decisionNumber: latestRejection.applicationNumber,
+      },
+    };
+
+  } catch (error) {
+    console.error(`❌ [KIPRIS] Error parsing rejection reason XML:`, error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error occurred",
+    };
+  }
+}
+
+/**
+ * 의견제출통지서 조회 API - IntermediateDocumentOPService 사용
+ * 키프리스 플러스 API의 여러 오퍼레이션을 통합하여 거절사유 조회
+ */
+export async function getRejectionReasonFromAPI(
+  applicationNumber: string
+): Promise<{
+  success: boolean;
+  data?: {
+    rejectionReason?: string;
+    rejectionReasonSummary?: string;
+    legalGround?: string;
+    rejectionDate?: string;
+    decisionNumber?: string;
+    // 추가된 상세 정보
+    appealStatus?: string;
+    finalDecision?: string;
+    documentType?: string;
+    filePath?: string;
+    pdfFileUrl?: string; // PDF 다운로드 링크
+    docName?: string; // 문서명
+    rejectionDetails?: {
+      rejectionType: string;
+      rejectionReasons: string[];
+      decisionAuthority: string;
+      appealDeadline?: string;
+      nextSteps?: string;
+    };
+  };
+  error?: string;
+}> {
+  // 쿨다운 중이면 즉시 중단(무료 한도 초과 보호)
+  if (Date.now() < kiprisQuotaCooldownUntil) {
+    return { success: false, error: 'KIPRIS quota cooldown active' };
+  }
+
+  // 캐시 확인
+  const cacheKey = applicationNumber.replace(/[-\s]/g, '');
+  const cached = rejectionInfoCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < REJECTION_CACHE_TTL_MS) {
+    return { success: true, data: cached.data };
+  }
+  // IntermediateDocumentOPService용 API 키 사용
+  const kiprisKey = process.env.KIPRIS_LEGAL_API_KEY || process.env.KIPRIS_API_KEY;
+  if (!kiprisKey) {
+    console.error("❌ [SERVER] KIPRIS_LEGAL_API_KEY or KIPRIS_API_KEY is missing");
+    return {
+      success: false,
+      error: "KIPRIS API key is not set"
+    };
+  }
+
+  // 출원번호 형식 정리 (하이픈 제거, 공백 제거)
+  const cleanApplicationNumber = applicationNumber.replace(/[-\s]/g, "");
+  
+  console.log(`🔍 [KIPRIS] Starting IntermediateDocumentOPService search for applicationNumber: ${applicationNumber}`);
+  console.log(`🔍 [KIPRIS] Cleaned applicationNumber: ${cleanApplicationNumber}`);
+
+  // 권한 만료 상태 확인을 위한 변수
+  let hasPermissionError = false;
+
+  // 누적 수집 객체 (PDF가 없어도 텍스트 정보는 유지)
+  let collected: any | null = null;
+
+  // 1차 시도: examineResultInfo (심사결과)
+  try {
+    const examineResult = await callIntermediateDocumentAPI('examineResultInfo', cleanApplicationNumber, kiprisKey);
+    if (examineResult.success && examineResult.data) {
+      console.log('✅ [KIPRIS] Found data in examineResultInfo');
+      collected = examineResult.data;
+    }
+    // 권한/한도 만료 에러 체크
+    if (examineResult.error && (examineResult.error.includes('서비스 이용 권한') || examineResult.error.includes('무료로 사용가능한 요청횟수') || examineResult.error.includes('무료 사용 한도'))) {
+      hasPermissionError = true;
+      console.log('🚫 [KIPRIS] Permission/quota expired, stopping further API calls');
+    }
+  } catch (error) {
+    console.warn('⚠️ [KIPRIS] examineResultInfo failed:', error);
+  }
+
+  // 권한 만료 시 추가 API 호출 중단
+  if (hasPermissionError) {
+    console.log('❌ [KIPRIS] API permission expired, returning error');
+    return {
+      success: false,
+      error: "키프리스 플러스 서비스 이용 권한이 만료되었거나 무료 사용 한도를 초과했습니다"
+    };
+  }
+
+  // 2차 시도: rejectDecisionInfo (거절결정)
+  try {
+    const rejectResult = await callIntermediateDocumentAPI('rejectDecisionInfo', cleanApplicationNumber, kiprisKey);
+    if (rejectResult.success && rejectResult.data) {
+      console.log('✅ [KIPRIS] Found data in rejectDecisionInfo');
+      // 기존 수집 데이터와 병합 (PDF가 없을 수 있어 누적 유지)
+      collected = { ...(collected || {}), ...rejectResult.data };
+    }
+    // 권한/한도 만료 에러 체크
+    if (rejectResult.error && (rejectResult.error.includes('서비스 이용 권한') || rejectResult.error.includes('무료로 사용가능한 요청횟수') || rejectResult.error.includes('무료 사용 한도'))) {
+      hasPermissionError = true;
+    }
+  } catch (error) {
+    console.warn('⚠️ [KIPRIS] rejectDecisionInfo failed:', error);
+  }
+
+  // 권한 만료 시 추가 API 호출 중단
+  if (hasPermissionError) {
+    console.log('❌ [KIPRIS] API permission expired, returning error');
+    // 10분 쿨다운 설정(무의미한 재시도 방지)
+    setQuotaCooldown(10);
+    return {
+      success: false,
+      error: "키프리스 플러스 서비스 이용 권한이 만료되었거나 무료 사용 한도를 초과했습니다"
+    };
+  }
+
+  // 3차 시도: additionRejectInfo (추가거절)
+  try {
+    const additionResult = await callIntermediateDocumentAPI('additionRejectInfo', cleanApplicationNumber, kiprisKey);
+    if (additionResult.success && additionResult.data) {
+      console.log('✅ [KIPRIS] Found data in additionRejectInfo');
+      collected = { ...(collected || {}), ...additionResult.data };
+    }
+  } catch (error) {
+    console.warn('⚠️ [KIPRIS] additionRejectInfo failed:', error);
+  }
+
+  // 4차 시도: pdfInfo (PDF 문서) - 항상 시도하여 PDF URL 확보를 최우선
+  try {
+    const pdfResult = await callIntermediateDocumentAPI('pdfInfo', cleanApplicationNumber, kiprisKey);
+    if (pdfResult.success && pdfResult.data) {
+      console.log('✅ [KIPRIS] Found data in pdfInfo');
+      collected = { ...(collected || {}), ...pdfResult.data };
+    }
+  } catch (error) {
+    console.warn('⚠️ [KIPRIS] pdfInfo failed:', error);
+  }
+
+  // 5차 시도(보강): advancedSearchInfo (일부 문서에서 filePath 제공)
+  try {
+    const advancedResult = await callIntermediateDocumentAPI('advancedSearchInfo', cleanApplicationNumber, kiprisKey);
+    if (advancedResult.success && advancedResult.data) {
+      console.log('✅ [KIPRIS] Found data in advancedSearchInfo');
+      collected = { ...(collected || {}), ...advancedResult.data };
+    }
+  } catch (error) {
+    console.warn('⚠️ [KIPRIS] advancedSearchInfo failed:', error);
+  }
+
+  // 수집된 데이터가 있다면 반환 (PDF 유무와 관계없이)
+  if (collected) {
+    // 캐시에 저장
+    rejectionInfoCache.set(cacheKey, { cachedAt: Date.now(), data: collected });
+    return { success: true, data: collected };
+  }
+
+  // 모든 시도 실패
+  console.log('❌ [KIPRIS] No rejection data found in any IntermediateDocumentOPService operation');
+  return {
+    success: false,
+    error: "의견제출통지서 정보를 찾을 수 없습니다"
+  };
+}
+
+/**
+ * IntermediateDocumentOPService API 호출 함수
+ * 여러 오퍼레이션을 지원하는 통합 함수
+ */
+async function callIntermediateDocumentAPI(
+  operation: 'examineResultInfo' | 'rejectDecisionInfo' | 'additionRejectInfo' | 'advancedSearchInfo' | 'pdfInfo',
+  applicationNumber: string,
+  kiprisKey: string
+): Promise<{
+  success: boolean;
+  data?: {
+    rejectionReason?: string;
+    rejectionReasonSummary?: string;
+    legalGround?: string;
+    rejectionDate?: string;
+    decisionNumber?: string;
+    documentType?: string;
+    filePath?: string;
+    rejectionDetails?: {
+      rejectionType: string;
+      rejectionReasons: string[];
+      decisionAuthority: string;
+      appealDeadline?: string;
+      nextSteps?: string;
+    };
+  };
+  error?: string;
+}> {
+  // 오퍼레이션별 URL 구성
+  const baseUrl = 'http://plus.kipris.or.kr/openapi/rest/IntermediateDocumentOPService';
+  const url = `${baseUrl}/${operation}?applicationNumber=${applicationNumber}&accessKey=${kiprisKey}`;
+
+  console.log(`🔍 [KIPRIS] Calling ${operation} for applicationNumber: ${applicationNumber}`);
+  console.log(`🔍 [KIPRIS] URL: ${url.replace(kiprisKey, '***')}`);
+
+  try {
+    const response = await fetch(url);
+    console.log(`🔍 [KIPRIS] ${operation} response status: ${response.status} ${response.statusText}`);
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    const xmlText = await response.text();
+    console.log(`🔍 [KIPRIS] ${operation} XML response length: ${xmlText.length}`);
+    console.log(`🔍 [KIPRIS] ${operation} XML response preview: ${xmlText.substring(0, 300)}...`);
+
+    // XML 파싱 (오퍼레이션별로 다른 파싱 로직)
+    return parseIntermediateDocumentXML(xmlText, operation);
+
+  } catch (error) {
+    console.error(`❌ [KIPRIS] Error calling ${operation} for ${applicationNumber}:`, error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error occurred",
+    };
+  }
+}
+
+/**
+ * IntermediateDocumentOPService XML 응답 파싱 함수
+ */
+function parseIntermediateDocumentXML(
+  xmlText: string,
+  operation: string
+): {
+  success: boolean;
+  data?: {
+    rejectionReason?: string;
+    rejectionReasonSummary?: string;
+    legalGround?: string;
+    rejectionDate?: string;
+    decisionNumber?: string;
+    documentType?: string;
+    filePath?: string;
+    rejectionDetails?: {
+      rejectionType: string;
+      rejectionReasons: string[];
+      decisionAuthority: string;
+      appealDeadline?: string;
+      nextSteps?: string;
+    };
+  };
+  error?: string;
+} {
+  try {
+    // 간단한 텍스트 기반 XML 파싱 (서버 환경용)
+    
+    // resultCode 체크
+    const resultCodeMatch = xmlText.match(/<resultCode>(.*?)<\/resultCode>/);
+    const resultMsgMatch = xmlText.match(/<resultMsg>(.*?)<\/resultMsg>/);
+    
+    const resultCode = resultCodeMatch ? resultCodeMatch[1] : '';
+    const resultMsg = resultMsgMatch ? resultMsgMatch[1] : '';
+    
+    if (resultCode && resultCode !== '00' && resultCode !== '') {
+      console.warn(`⚠️ [KIPRIS] API returned non-success code: ${resultCode} - ${resultMsg}`);
+      
+      // 권한 관련 에러는 특별 처리
+      if (resultCode === '10' || resultCode === '22') {
+        const errorType = resultCode === '10' ? '서비스 이용 권한' : '무료 사용 한도';
+        console.warn(`🚫 [KIPRIS] ${errorType} 에러 감지, API 호출 중단 필요`);
+      }
+      
+      return {
+        success: false,
+        error: `API Error: ${resultCode} - ${resultMsg}`
+      };
+    }
+
+    // 오퍼레이션별 데이터 추출
+    switch (operation) {
+      case 'examineResultInfo':
+        return parseExamineResultInfoText(xmlText);
+      case 'rejectDecisionInfo':
+        return parseRejectDecisionInfoText(xmlText);
+      case 'additionRejectInfo':
+        return parseAdditionRejectInfoText(xmlText);
+      case 'advancedSearchInfo':
+        return parseAdvancedSearchInfoText(xmlText);
+      case 'pdfInfo':
+        return parsePdfInfoText(xmlText);
+      default:
+        throw new Error(`Unknown operation: ${operation}`);
+    }
+
+  } catch (error) {
+    console.error(`❌ [KIPRIS] Error parsing ${operation} XML:`, error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "XML parsing failed"
+    };
+  }
+}
+
+/**
+ * examineResultInfo XML 파싱 (텍스트 기반)
+ */
+function parseExamineResultInfoText(xmlText: string) {
+  if (!xmlText.includes('<examineResultInfo>')) {
+    return { success: false, error: "No examineResultInfo found" };
+  }
+
+  const extractValue = (tag: string): string => {
+    const match = xmlText.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
+    return match ? match[1].trim() : "";
+  };
+
+  const applicationNumber = extractValue('applicationNumber');
+  const sendNumber = extractValue('sendNumber');
+  const examinationTitle = extractValue('examinationTitle');
+  const examinationContent = extractValue('examinationContent');
+  const refusalLawTitle = extractValue('refusalLawTitle');
+  const refusalLawTabularstatement = extractValue('refusalLawTabularstatement');
+
+  // 거절사유 요약 생성
+  const rejectionReason = `${examinationTitle}\n${examinationContent}\n${refusalLawTitle}\n${refusalLawTabularstatement}`.trim();
+  const rejectionReasonSummary = summarizeRejectionContent(rejectionReason);
+
+  return {
+    success: true,
+    data: {
+      rejectionReason,
+      rejectionReasonSummary,
+      legalGround: refusalLawTabularstatement,
+      rejectionDate: "", // examineResultInfo에는 날짜 정보가 명확하지 않음
+      decisionNumber: sendNumber,
+      documentType: "심사결과통지서",
+      filePath: "", // examineResultInfo에는 파일경로 없음
+      pdfFileUrl: "", // examineResultInfo에는 PDF URL 없음
+      docName: "심사결과통지서",
+      rejectionDetails: {
+        rejectionType: "심사결과",
+        rejectionReasons: [rejectionReason],
+        decisionAuthority: "특허청",
+        appealDeadline: "",
+        nextSteps: "의견서 또는 보정서 제출"
+      }
+    }
+  };
+}
+
+/**
+ * rejectDecisionInfo XML 파싱 (텍스트 기반)
+ */
+function parseRejectDecisionInfoText(xmlText: string) {
+  if (!xmlText.includes('<rejectDecisionInfo>')) {
+    return { success: false, error: "No rejectDecisionInfo found" };
+  }
+
+  const extractValue = (tag: string): string => {
+    const match = xmlText.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
+    return match ? match[1].trim() : "";
+  };
+
+  const applicationNumber = extractValue('applicationNumber');
+  const sendNumber = extractValue('sendNumber');
+  const lawContent = extractValue('lawContent');
+  const rejectionContentTitle = extractValue('rejectionContentTitle');
+  const rejectionContentDetail = extractValue('rejectionContentDetail');
+  const attachmentfileContent = extractValue('attachmentfileContent');
+  const guidanceContent = extractValue('guidanceContent');
+
+  // 거절사유 조합
+  const rejectionReason = `${rejectionContentTitle}\n${rejectionContentDetail}`.trim();
+  const rejectionReasonSummary = summarizeRejectionContent(rejectionReason);
+
+  return {
+    success: true,
+    data: {
+      rejectionReason,
+      rejectionReasonSummary,
+      legalGround: lawContent,
+      rejectionDate: "", // rejectDecisionInfo에는 명확한 날짜 정보 없음
+      decisionNumber: sendNumber,
+      documentType: "거절결정서",
+      filePath: "", // rejectDecisionInfo에는 파일경로 없음
+      pdfFileUrl: "", // rejectDecisionInfo에는 PDF URL 없음
+      docName: "거절결정서",
+      rejectionDetails: {
+        rejectionType: "거절결정",
+        rejectionReasons: [rejectionReason],
+        decisionAuthority: "특허청",
+        appealDeadline: "",
+        nextSteps: guidanceContent
+      }
+    }
+  };
+}
+
+/**
+ * additionRejectInfo XML 파싱 (텍스트 기반)
+ */
+function parseAdditionRejectInfoText(xmlText: string) {
+  if (!xmlText.includes('<additionRejectInfo>')) {
+    return { success: false, error: "No additionRejectInfo found" };
+  }
+
+  const extractValue = (tag: string): string => {
+    const match = xmlText.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
+    return match ? match[1].trim() : "";
+  };
+
+  const applicationNumber = extractValue('applicationNumber');
+  const sendNumber = extractValue('sendNumber');
+  const sequence = extractValue('sequence');
+  const additionRejectionContent = extractValue('additionRejectionContent');
+
+  const rejectionReasonSummary = summarizeRejectionContent(additionRejectionContent);
+
+  return {
+    success: true,
+    data: {
+      rejectionReason: additionRejectionContent,
+      rejectionReasonSummary,
+      legalGround: "실용신안법 제4조제2항", // additionRejectInfo에서 일반적인 법적근거
+      rejectionDate: "",
+      decisionNumber: sendNumber,
+      documentType: "추가거절통지서",
+      filePath: "",
+      pdfFileUrl: "", // additionRejectInfo에는 PDF URL 없음
+      docName: "추가거절통지서",
+      rejectionDetails: {
+        rejectionType: "추가거절",
+        rejectionReasons: [additionRejectionContent],
+        decisionAuthority: "특허청",
+        appealDeadline: "",
+        nextSteps: "의견서 제출 또는 보정서 제출"
+      }
+    }
+  };
+}
+
+/**
+ * advancedSearchInfo XML 파싱 (텍스트 기반)
+ */
+function parseAdvancedSearchInfoText(xmlText: string) {
+  if (!xmlText.includes('<advancedSearchInfo>')) {
+    return { success: false, error: "No advancedSearchInfo found" };
+  }
+
+  const extractValue = (tag: string): string => {
+    const match = xmlText.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
+    return match ? match[1].trim() : "";
+  };
+
+  const applicationNumber = extractValue('applicationNumber');
+  const sendNumber = extractValue('sendNumber');
+  const sendDate = extractValue('sendDate');
+  const title = extractValue('title');
+  const filePath = extractValue('filePath');
+
+  // advancedSearchInfo는 주로 검색 결과 리스트를 제공하므로 기본 정보만 제공
+  const rejectionReason = `거절통지서: ${title}`;
+  const rejectionReasonSummary = title;
+
+  return {
+    success: true,
+    data: {
+      rejectionReason,
+      rejectionReasonSummary,
+      legalGround: "관련 법조항 정보는 원문에서 확인",
+      rejectionDate: sendDate,
+      decisionNumber: sendNumber,
+      documentType: "거절통지서",
+      filePath,
+      pdfFileUrl: filePath, // advancedSearchInfo에서는 filePath를 PDF URL로 사용
+      docName: title || "거절통지서",
+      rejectionDetails: {
+        rejectionType: "거절통지",
+        rejectionReasons: [rejectionReason],
+        decisionAuthority: "특허청",
+        appealDeadline: "",
+        nextSteps: "원문 문서에서 상세 내용 확인"
+      }
+    }
+  };
+}
+
+/**
+ * pdfInfo XML 파싱 (텍스트 기반)
+ */
+function parsePdfInfoText(xmlText: string) {
+  if (!xmlText.includes('<pdfInfo>')) {
+    return { success: false, error: "No pdfInfo found" };
+  }
+
+  const extractValue = (tag: string): string => {
+    const match = xmlText.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
+    return match ? match[1].trim() : "";
+  };
+
+  const fileName = extractValue('fileName');
+  const filePath = extractValue('filePath');
+
+  return {
+    success: true,
+    data: {
+      rejectionReason: `PDF 문서: ${fileName}`,
+      rejectionReasonSummary: "PDF 원문 문서 제공",
+      legalGround: "관련 법조항은 PDF 문서에서 확인",
+      rejectionDate: "",
+      decisionNumber: "",
+      documentType: "PDF 문서",
+      filePath,
+      pdfFileUrl: filePath, // PDF 다운로드 링크
+      docName: fileName || "의견제출통지서",
+      rejectionDetails: {
+        rejectionType: "PDF 문서",
+        rejectionReasons: [`PDF 파일: ${fileName}`],
+        decisionAuthority: "특허청",
+        appealDeadline: "",
+        nextSteps: "PDF 문서를 다운로드하여 상세 내용 확인"
+      }
+    }
+  };
+}
+
+/**
+ * 거절사유 요약 함수
+ */
+function summarizeRejectionContent(content: string): string {
+  if (!content) return '';
+  // 공백/태그 제거
+  let text = content.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  // 상표법 제23조 통지 상투구 제거
+  text = text
+    .replace(/이 출원에 대한 심사결과[\s\S]*?통지하오니/gi, '')
+    .replace(/상표법 제23조[\s\S]*?통지(?:합니다|하오니)/gi, '')
+    .replace(/[\[\(【]이유[\]\)】]\s*/g, '');
+
+  // "이유" 또는 "거절이유" 섹션 우선 추출
+  const reasonSectionMatch = text.match(/(?:이유|거절이유)\s*[:：]?\s*([\s\S]+)/);
+  const base = reasonSectionMatch ? reasonSectionMatch[1] : text;
+
+  // 핵심 키워드 우선 문장 선택
+  const keywords = ['유사', '혼동', '식별력', '설명적', '일반적', '지리적', '품질 오인', '출처 오인', '동일', '선행'];
+  const sentences = base.split(/(?<=\.|!|\?|다\.)\s+/).map(s => s.trim()).filter(Boolean);
+  const picked = sentences.find(s => keywords.some(k => s.includes(k))) || sentences[0] || '';
+  return picked.length > 140 ? picked.slice(0, 140) + '...' : picked;
+}
+
+/**
+ * 거절사유 데이터 조회 API 호출 함수 (기존 함수명 유지)
+ * 키프리스 Plus API의 IntermediateDocumentOPService/advancedSearchInfo 엔드포인트 사용
+ */
+/**
+ * 거절사유 파일 내용 조회 함수
+ * filePath URL에서 실제 거절사유 내용을 가져옴
+ */
+export async function fetchRejectionFileContent(filePath: string): Promise<{
+  success: boolean;
+  content?: string;
+  summary?: string;
+  legalGrounds?: string[];
+  error?: string;
+}> {
+  try {
+    console.log(`🔍 [KIPRIS] Fetching rejection file content from: ${filePath.substring(0, 100)}...`);
+
+    const response = await fetch(filePath);
+    
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const content = await response.text();
+    console.log(`📄 [KIPRIS] File content length: ${content.length}`);
+
+    // 거절사유 내용 분석
+    const analysis = analyzeRejectionContent(content);
+
+    return {
+      success: true,
+      content,
+      summary: analysis.summary,
+      legalGrounds: analysis.legalGrounds
+    };
+
+  } catch (error) {
+    console.error('❌ [KIPRIS] Failed to fetch rejection file:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
+}
+
+/**
+ * 거절사유 내용 분석 함수
+ */
+function analyzeRejectionContent(content: string): {
+  summary: string;
+  legalGrounds: string[];
+} {
+  // HTML 태그 제거
+  const cleanContent = content.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  
+  // 법적 근거 추출 (상표법, 특허법 등)
+  const legalGrounds = extractLegalGrounds(cleanContent);
+  
+  // 거절사유 요약 생성
+  const summary = generateRejectionSummary(cleanContent);
+
+  return {
+    summary,
+    legalGrounds
+  };
+}
+
+/**
+ * 법적 근거 추출 함수
+ */
+function extractLegalGrounds(content: string): string[] {
+  const legalGrounds: string[] = [];
+  
+  // 상표법 관련 조항
+  const trademarkLaws = [
+    /상표법\s*제?\s*(\d+)\s*조/g,
+    /상표법\s*시행령\s*제?\s*(\d+)\s*조/g,
+    /상표법\s*시행규칙\s*제?\s*(\d+)\s*조/g
+  ];
+
+  // 특허법 관련 조항
+  const patentLaws = [
+    /특허법\s*제?\s*(\d+)\s*조/g,
+    /특허법\s*시행령\s*제?\s*(\d+)\s*조/g,
+    /특허법\s*시행규칙\s*제?\s*(\d+)\s*조/g
+  ];
+
+  // 실용신안법, 디자인보호법 등
+  const otherLaws = [
+    /실용신안법\s*제?\s*(\d+)\s*조/g,
+    /디자인보호법\s*제?\s*(\d+)\s*조/g
+  ];
+
+  [...trademarkLaws, ...patentLaws, ...otherLaws].forEach(regex => {
+    let match;
+    while ((match = regex.exec(content)) !== null) {
+      legalGrounds.push(match[0]);
+    }
+  });
+
+  // 중복 제거
+  return [...new Set(legalGrounds)];
+}
+
+/**
+ * 거절사유 요약 생성 함수
+ */
+function generateRejectionSummary(content: string): string {
+  // 주요 키워드들
+  const keywords = [
+    '식별력', '신규성', '진보성', '산업상이용가능성',
+    '동일', '유사', '혼동', '선행기술', '공지', '자명',
+    '불분명', '기재불비', '명확성', '구체성'
+  ];
+
+  const foundKeywords = keywords.filter(keyword => content.includes(keyword));
+  
+  if (foundKeywords.length === 0) {
+    return '거절사유 정보를 추출할 수 없습니다.';
+  }
+
+  // 첫 번째 문장들에서 주요 내용 추출
+  const sentences = content.split(/[.!?]/).filter(s => s.trim().length > 10);
+  const relevantSentences = sentences.filter(sentence => 
+    foundKeywords.some(keyword => sentence.includes(keyword))
+  ).slice(0, 3);
+
+  if (relevantSentences.length > 0) {
+    return relevantSentences.join('. ') + '.';
+  }
+
+  return `주요 거절사유: ${foundKeywords.join(', ')}`;
+}
+
+export async function getRejectionDataFromAPI(
+  keyword: string = "식별력",
+  options: {
+    patent?: boolean;
+    utility?: boolean; 
+    design?: boolean;
+    tradeMark?: boolean;
+    docsStart?: number;
+    docsCount?: number;
+  } = {}
+): Promise<{
+  success: boolean;
+  data?: {
+    items: Array<{
+      indexNo: string;
+      applicationNumber: string;
+      sendNumber: string;
+      sendDate: string;
+      title: string;
+      filePath: string;
+    }>;
+    totalCount: number;
+  };
+  error?: string;
+}> {
+  const kiprisKey = process.env.KIPRIS_API_KEY;
+  if (!kiprisKey) {
+    console.error("❌ [SERVER] KIPRIS_API_KEY is missing");
+    return {
+      success: false,
+      error: "KIPRIS_API_KEY is not set"
+    };
+  }
+
+  // 기본 옵션 설정
+  const defaultOptions = {
+    patent: false,
+    utility: false,
+    design: false,
+    tradeMark: true,
+    docsStart: 1,
+    docsCount: 30,
+    ...options
+  };
+
+  // URL 구성
+  const url = `http://plus.kipris.or.kr/openapi/rest/IntermediateDocumentOPService/advancedSearchInfo`;
+  const params = new URLSearchParams({
+    rejectionContent: keyword,
+    patent: defaultOptions.patent.toString(),
+    utility: defaultOptions.utility.toString(),
+    design: defaultOptions.design.toString(),
+    tradeMark: defaultOptions.tradeMark.toString(),
+    docsStart: defaultOptions.docsStart.toString(),
+    docsCount: defaultOptions.docsCount.toString(),
+    accessKey: kiprisKey
+  });
+
+  const fullUrl = `${url}?${params.toString()}`;
+
+  console.log(`🔍 [KIPRIS] Calling advancedSearchInfo for keyword: "${keyword}"`);
+  console.log(`🔍 [KIPRIS] URL: ${fullUrl.replace(kiprisKey, '***')}`);
+
+  try {
+    const response = await fetch(fullUrl);
+    console.log(`🔍 [KIPRIS] Response status: ${response.status} ${response.statusText}`);
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    const xmlText = await response.text();
+    console.log(`🔍 [KIPRIS] XML response length: ${xmlText.length}`);
+    console.log(`🔍 [KIPRIS] XML response preview: ${xmlText.substring(0, 500)}...`);
+
+    // XML 파싱
+    return parseRejectionDataXML(xmlText);
+
+  } catch (error) {
+    console.error(
+      `❌ [KIPRIS] Error fetching rejection data for keyword "${keyword}":`,
+      error
+    );
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error occurred",
+    };
+  }
+}
+
+/**
+ * 거절사유 XML 응답을 파싱하는 함수
+ */
+function parseRejectionDataXML(xmlText: string): {
+  success: boolean;
+  data?: {
+    items: Array<{
+      indexNo: string;
+      applicationNumber: string;
+      sendNumber: string;
+      sendDate: string;
+      title: string;
+      filePath: string;
+    }>;
+    totalCount: number;
+  };
+  error?: string;
+} {
+  try {
+    console.log(`🔍 [KIPRIS] Parsing rejection data XML response...`);
+
+    // 결과 코드 및 메시지 확인
+    const resultCodeMatch = xmlText.match(/<resultCode>(.*?)<\/resultCode>/);
+    const resultMsgMatch = xmlText.match(/<resultMsg>(.*?)<\/resultMsg>/);
+    
+    const resultCode = resultCodeMatch ? resultCodeMatch[1] : '';
+    const resultMsg = resultMsgMatch ? resultMsgMatch[1] : '';
+
+    console.log(`📋 [KIPRIS] Response - Code: "${resultCode}", Message: "${resultMsg}"`);
+
+    // 에러 체크
+    if (resultCode && resultCode !== '00' && resultCode !== '') {
+      // 권한 관련 에러는 특별 처리
+      if (resultCode === '10') {
+        throw new Error(`서비스 이용 권한이 만료되었습니다: ${resultMsg}`);
+      } else if (resultCode === '22') {
+        throw new Error(`무료 사용 한도를 초과했습니다: ${resultMsg}`);
+      } else {
+      throw new Error(`KIPRIS API returned error code: ${resultCode}, message: ${resultMsg}`);
+      }
+    }
+
+    // totCnt 추출
+    const totCntMatch = xmlText.match(/<totCnt>(\d+)<\/totCnt>/);
+    const totalCount = totCntMatch ? parseInt(totCntMatch[1]) : 0;
+
+    console.log(`📊 [KIPRIS] Total count from API: ${totalCount}`);
+
+    // advancedSearchInfo 항목들 추출
+    const advancedSearchInfoMatches = xmlText.match(/<advancedSearchInfo>([\s\S]*?)<\/advancedSearchInfo>/g);
+    
+    if (!advancedSearchInfoMatches) {
+      console.warn('⚠️ [KIPRIS] No <advancedSearchInfo> tags found in XML response');
+      return {
+        success: true,
+        data: {
+          items: [],
+          totalCount: 0
+        }
+      };
+    }
+
+    const items = [];
+    
+    for (const itemXml of advancedSearchInfoMatches) {
+      try {
+        const item = parseRejectionItem(itemXml);
+        if (item) {
+          items.push(item);
+        }
+      } catch (itemError) {
+        console.warn('⚠️ [KIPRIS] Failed to parse rejection item XML:', itemError);
+      }
+    }
+
+    console.log(`✅ [KIPRIS] Successfully parsed ${items.length} rejection items`);
+
+    return {
+      success: true,
+      data: {
+        items,
+        totalCount
+      }
+    };
+
+  } catch (error) {
+    console.error('❌ [KIPRIS] XML parsing failed:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'XML parsing failed'
+    };
+  }
+}
+
+/**
+ * 개별 거절사유 항목 파싱
+ */
+function parseRejectionItem(itemXml: string): {
+  indexNo: string;
+  applicationNumber: string;
+  sendNumber: string;
+  sendDate: string;
+  title: string;
+  filePath: string;
+} | null {
+  try {
+    const indexNoMatch = itemXml.match(/<indexNo>(.*?)<\/indexNo>/);
+    const applicationNumberMatch = itemXml.match(/<applicationNumber>(.*?)<\/applicationNumber>/);
+    const sendNumberMatch = itemXml.match(/<sendNumber>(.*?)<\/sendNumber>/);
+    const sendDateMatch = itemXml.match(/<sendDate>(.*?)<\/sendDate>/);
+    const titleMatch = itemXml.match(/<title>(.*?)<\/title>/);
+    const filePathMatch = itemXml.match(/<filePath>(.*?)<\/filePath>/);
+
+    const item = {
+      indexNo: indexNoMatch ? indexNoMatch[1] : '',
+      applicationNumber: applicationNumberMatch ? applicationNumberMatch[1] : '',
+      sendNumber: sendNumberMatch ? sendNumberMatch[1] : '',
+      sendDate: sendDateMatch ? sendDateMatch[1] : '',
+      title: titleMatch ? titleMatch[1] : '',
+      filePath: filePathMatch ? filePathMatch[1] : ''
+    };
+
+    // 필수 필드 체크 (출원번호만 필수, title은 선택)
+    if (!item.applicationNumber) {
+      console.warn('⚠️ [KIPRIS] Item missing applicationNumber:', { 
+        applicationNumber: item.applicationNumber 
+      });
+      return null;
+    }
+
+    // title이 비어있으면 출원번호를 기반으로 기본값 설정
+    if (!item.title || item.title.trim() === '') {
+      item.title = `거절통지서 (${item.applicationNumber})`;
+      console.log('🔧 [KIPRIS] Empty title filled with default:', item.title);
+    }
+
+    return item;
+
+  } catch (error) {
+    console.error('❌ [KIPRIS] Item XML parsing failed:', error);
+    return null;
+  }
+}

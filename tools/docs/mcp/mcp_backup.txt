@@ -1,0 +1,5 @@
+filesystem: npx @modelcontextprotocol/server-filesystem /Users/oseungmin/Desktop/ipdr_mvp1
+sequential-thinking: npx @modelcontextprotocol/server-sequential-thinking
+memory: npx @modelcontextprotocol/server-memory
+gemini-cli: npx -y gemini-mcp-tool
+supabase: npx -y @supabase/mcp-server-supabase@latest --project-ref=fwsdfirkkjjstajxnsrq

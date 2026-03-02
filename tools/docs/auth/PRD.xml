@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<product_requirements_document>
+  <metadata>
+    <product_name>IP-DR 통합 인증 시스템</product_name>
+    <version>1.0</version>
+    <date>2025-07-11</date>
+    <author>oh79</author>
+  </metadata>
+
+  <objectives>
+    <objective priority="high">안전하고 편리한 사용자 인증 경험 제공</objective>
+    <objective priority="high">다양한 인증 방식 지원 (이메일, 소셜)</objective>
+    <objective priority="medium">확장 가능한 인증 아키텍처 구축</objective>
+  </objectives>
+
+  <features>
+    <feature id="email-auth" phase="1" status="required">
+      <name>이메일 인증</name>
+      <requirements>
+        <requirement>이메일 중복 확인</requirement>
+        <requirement>비밀번호 강도 검증 (8자 이상, 대소문자/숫자/특수문자)</requirement>
+        <requirement>이메일 인증 필수</requirement>
+        <requirement>프로필 정보 수집 (이름, 전화번호-선택)</requirement>
+      </requirements>
+    </feature>
+
+    <feature id="social-login" phase="2" status="planned">
+      <name>소셜 로그인</name>
+      <providers>
+        <provider name="kakao" enabled="false" business_required="true"/>
+        <provider name="naver" enabled="false" business_required="true"/>
+        <provider name="google" enabled="false" phase="3"/>
+      </providers>
+      <requirements>
+        <requirement>이메일 기준 중복 계정 병합</requirement>
+        <requirement>다중 소셜 계정 연동 지원</requirement>
+        <requirement>연동 해제 기능</requirement>
+      </requirements>
+    </feature>
+
+    <feature id="session-management" phase="1" status="required">
+      <name>세션 관리</name>
+      <requirements>
+        <requirement>JWT + Refresh Token</requirement>
+        <requirement>로그인 상태 유지 (최대 30일)</requirement>
+        <requirement>다중 디바이스 세션 관리</requirement>
+      </requirements>
+    </feature>
+  </features>
+
+  <performance_requirements>
+    <requirement metric="login_response_time" target="2s"/>
+    <requirement metric="signup_completion_time" target="3s"/>
+    <requirement metric="email_delivery_time" target="5s"/>
+    <requirement metric="page_load_time" target="1s"/>
+    <requirement metric="concurrent_users" target="1000"/>
+  </performance_requirements>
+
+  <security_requirements>
+    <requirement type="encryption">HTTPS 필수</requirement>
+    <requirement type="password">bcrypt 해싱</requirement>
+    <requirement type="csrf">CSRF 토큰 검증</requirement>
+    <requirement type="rate_limiting">IP당 분당 10회</requirement>
+    <requirement type="compliance">GDPR/KISA 가이드라인 준수</requirement>
+  </security_requirements>
+
+  <ux_requirements>
+    <requirement>반응형 디자인 (모바일 우선)</requirement>
+    <requirement>다크모드 지원</requirement>
+    <requirement>한국어/영어 지원</requirement>
+    <requirement>WCAG 2.1 AA 준수</requirement>
+  </ux_requirements>
+</product_requirements_document>

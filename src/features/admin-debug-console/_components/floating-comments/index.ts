@@ -1,0 +1,5 @@
+export { FloatingCommentSystem } from './FloatingCommentSystem'
+export { CommentTrigger } from './CommentTrigger'
+export { CommentPopover } from './CommentPopover'
+export { CommentSidebar } from './CommentSidebar'
+export { CommentHighlight, CommentHighlightLayer } from './CommentHighlight'

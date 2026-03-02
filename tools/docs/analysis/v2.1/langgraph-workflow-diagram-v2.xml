@@ -1,0 +1,208 @@
+<mxfile host="app.diagrams.net" agent="5.0">
+  <diagram name="LangGraph Trademark Analysis Workflow" id="trademark-workflow">
+    <mxGraphModel dx="1422" dy="855" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        
+        <!-- Start Point -->
+        <mxCell id="start" value="START" style="ellipse;whiteSpace=wrap;html=1;fontSize=14;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="80" y="40" width="100" height="60" as="geometry" />
+        </mxCell>
+        
+        <!-- Information Collector Node -->
+        <mxCell id="infoCollector" value="Information Collector;정보 수집기;;체크리스트 관리;필수 정보 확인;사용자 입력 검증" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="160" width="180" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- Ask User Node -->
+        <mxCell id="askUser" value="Ask User;사용자 질문;;동적 질문 생성;응답 처리;대화 히스토리 관리" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=top;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="280" y="160" width="180" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- Briefing Node -->
+        <mxCell id="briefing" value="Briefing;중간 브리핑;;수집된 정보 요약;분석 계획 수립;사용자 확인" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#e1d5e7;strokeColor=#9673a6;verticalAlign=top;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="320" width="180" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- Parallel Analysis Container -->
+        <mxCell id="parallelContainer" value="3채널 병렬 분석 (Parallel Analysis)" style="rounded=1;whiteSpace=wrap;html=1;fontSize=14;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="300" y="300" width="600" height="140" as="geometry" />
+        </mxCell>
+        
+        <!-- KIPRIS Search Node -->
+        <mxCell id="kipris" value="KIPRIS Search;상표 검색;;기존 상표 검색;유사도 분석;충돌 위험 평가" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="320" y="340" width="140" height="80" as="geometry" />
+        </mxCell>
+        
+        <!-- Internet Reputation Node -->
+        <mxCell id="internet" value="Internet Reputation;인터넷 평판 분석;;온라인 존재감;평판 점수;경쟁사 분석" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="480" y="340" width="140" height="80" as="geometry" />
+        </mxCell>
+        
+        <!-- Legal Review Node -->
+        <mxCell id="legal" value="Legal Review;법률 검토;;관련 법령 검토;위험 요소 분석;법적 권고사항" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="640" y="340" width="140" height="80" as="geometry" />
+        </mxCell>
+        
+        <!-- Expert Analysis Container -->
+        <mxCell id="expertContainer" value="전문가 분석 (Expert Analysis - 10년차 변리사 수준)" style="rounded=1;whiteSpace=wrap;html=1;fontSize=14;fillColor=#d0cee2;strokeColor=#56517e;fontStyle=1;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="40" y="500" width="860" height="140" as="geometry" />
+        </mxCell>
+        
+        <!-- Classification Expert Node -->
+        <mxCell id="classificationExpert" value="Classification Expert;분류 전문가;;최적 분류 선택;전략적 분석;시장 분석" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#d0cee2;strokeColor=#56517e;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="60" y="540" width="140" height="80" as="geometry" />
+        </mxCell>
+        
+        <!-- Rejection Predictor Node -->
+        <mxCell id="rejectionPredictor" value="Rejection Predictor;거절 예측기;;거절 확률 예측;대응 전략 제안;성공 요인 분석" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#d0cee2;strokeColor=#56517e;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="220" y="540" width="140" height="80" as="geometry" />
+        </mxCell>
+        
+        <!-- Human in the Loop Node -->
+        <mxCell id="humanLoop" value="Human in the Loop;사용자 확인;;중요 이슈 확인;사용자 의사결정;전략 조정" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#d0cee2;strokeColor=#56517e;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="380" y="540" width="140" height="80" as="geometry" />
+        </mxCell>
+        
+        <!-- Critical Issue Handler Node -->
+        <mxCell id="criticalIssue" value="Critical Issue Handler;중요 이슈 처리;;이슈 감지;자동 해결;사용자 알림" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#d0cee2;strokeColor=#56517e;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="540" y="540" width="140" height="80" as="geometry" />
+        </mxCell>
+        
+        <!-- Report Synthesizer Node -->
+        <mxCell id="reportSynthesizer" value="Report Synthesizer;보고서 종합;;결과 통합;구조화된 보고서;전문가 의견 종합" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#e6f7ff;strokeColor=#1890ff;verticalAlign=top;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="320" y="700" width="180" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- Database Saver Node -->
+        <mxCell id="databaseSaver" value="Database Saver;데이터베이스 저장;;분석 결과 저장;세션 관리;히스토리 보관" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#f0f0f0;strokeColor=#666666;verticalAlign=top;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="560" y="700" width="180" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- End Point -->
+        <mxCell id="end" value="END" style="ellipse;whiteSpace=wrap;html=1;fontSize=14;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="800" y="720" width="100" height="60" as="geometry" />
+        </mxCell>
+        
+        <!-- Flow Arrows -->
+        
+        <!-- Start to Information Collector -->
+        <mxCell id="arrow1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontSize=12;" edge="1" parent="1" source="start" target="infoCollector">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Information Collector to Ask User (conditional) -->
+        <mxCell id="arrow2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontSize=12;strokeColor=#ff6600;dashed=1;" edge="1" parent="1" source="infoCollector" target="askUser">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="label2" value="정보 부족시" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontColor=#ff6600;" vertex="1" parent="1">
+          <mxGeometry x="240" y="180" width="70" height="20" as="geometry" />
+        </mxCell>
+        
+        <!-- Ask User back to Information Collector -->
+        <mxCell id="arrow3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontSize=12;strokeColor=#0066cc;curved=1;" edge="1" parent="1" source="askUser" target="infoCollector">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="370" y="140" />
+              <mxPoint x="130" y="140" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="label3" value="응답 처리" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontColor=#0066cc;" vertex="1" parent="1">
+          <mxGeometry x="240" y="120" width="60" height="20" as="geometry" />
+        </mxCell>
+        
+        <!-- Information Collector to Briefing (when complete) -->
+        <mxCell id="arrow4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontSize=12;strokeColor=#00cc00;" edge="1" parent="1" source="infoCollector" target="briefing">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="label4" value="필수 정보 완료" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontColor=#00cc00;" vertex="1" parent="1">
+          <mxGeometry x="130" y="280" width="80" height="20" as="geometry" />
+        </mxCell>
+        
+        <!-- Briefing to Parallel Analysis -->
+        <mxCell id="arrow5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;fontSize=12;strokeColor=#ff0000;" edge="1" parent="1" source="briefing" target="parallelContainer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="label5" value="3채널 병렬 실행" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;fontColor=#ff0000;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="250" y="350" width="90" height="20" as="geometry" />
+        </mxCell>
+        
+        <!-- Parallel Analysis to Expert Analysis -->
+        <mxCell id="arrow6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;fontSize=12;strokeColor=#6600cc;" edge="1" parent="1" source="parallelContainer" target="expertContainer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="label6" value="전문가 분석" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;fontColor=#6600cc;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="470" y="460" width="80" height="20" as="geometry" />
+        </mxCell>
+        
+        <!-- Expert Analysis Sequential Flow -->
+        <mxCell id="arrow7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontSize=12;" edge="1" parent="1" source="classificationExpert" target="rejectionPredictor">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontSize=12;" edge="1" parent="1" source="rejectionPredictor" target="humanLoop">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Human Loop to Critical Issue (conditional) -->
+        <mxCell id="arrow9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontSize=12;strokeColor=#ff9900;dashed=1;" edge="1" parent="1" source="humanLoop" target="criticalIssue">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="label10" value="이슈 발견시" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontColor=#ff9900;" vertex="1" parent="1">
+          <mxGeometry x="460" y="560" width="70" height="20" as="geometry" />
+        </mxCell>
+        
+        <!-- Expert Analysis to Report Synthesizer -->
+        <mxCell id="arrow11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;fontSize=12;strokeColor=#0099cc;" edge="1" parent="1" source="expertContainer" target="reportSynthesizer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="label11" value="보고서 생성" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;fontColor=#0099cc;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="410" y="660" width="80" height="20" as="geometry" />
+        </mxCell>
+        
+        <!-- Critical Issue to Report Synthesizer -->
+        <mxCell id="arrow12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontSize=12;strokeColor=#ff9900;" edge="1" parent="1" source="criticalIssue" target="reportSynthesizer">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="770" y="650" />
+              <mxPoint x="410" y="650" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- Report Synthesizer to Database Saver -->
+        <mxCell id="arrow13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontSize=12;" edge="1" parent="1" source="reportSynthesizer" target="databaseSaver">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Database Saver to End -->
+        <mxCell id="arrow14" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontSize=12;" edge="1" parent="1" source="databaseSaver" target="end">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Legend -->
+        <mxCell id="legend" value="범례 (Legend);;정보 수집/질문;중간 브리핑;3채널 병렬 분석;전문가 분석 (10년차 변리사);보고서 생성/저장;;실선: 순차 실행;점선: 조건부 실행;굵은선: 병렬/주요 흐름" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#f5f5f5;strokeColor=#666666;verticalAlign=top;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="160" width="200" height="180" as="geometry" />
+        </mxCell>
+        
+        <!-- Title -->
+        <mxCell id="title" value="LangGraph 상표 분석 워크플로우;(Trademark Analysis Workflow)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="400" y="10" width="400" height="50" as="geometry" />
+        </mxCell>
+        
+        <!-- State Management Info -->
+        <mxCell id="stateInfo" value="상태 관리 (State Management);;세션 ID 기반 추적;실시간 진행률 업데이트;에러 복구 지원;사용자 확인 대기;분석 결과 중앙 집중 관리" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#e6f3ff;strokeColor=#0066cc;verticalAlign=top;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="380" width="200" height="120" as="geometry" />
+        </mxCell>
+        
+        <!-- Key Features Info -->
+        <mxCell id="keyFeatures" value="주요 기능;;동적 질문 생성;3채널 병렬 분석;10년차 변리사 수준 전문 분석;중요 이슈 자동 감지;구조화된 최종 보고서;RPA 연동 지원" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#fff2e6;strokeColor=#ff9900;verticalAlign=top;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="540" width="200" height="120" as="geometry" />
+        </mxCell>
+        
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

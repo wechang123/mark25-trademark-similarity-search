@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<technical_requirements_document>
+  <metadata>
+    <product_name>IP-DR 통합 인증 시스템</product_name>
+    <version>1.0</version>
+    <date>2025-07-11</date>
+    <author>oh79</author>
+  </metadata>
+
+  <tech_stack>
+    <frontend>
+      <technology name="Next.js" version="14.x" purpose="SSR/SSG Framework"/>
+      <technology name="TypeScript" version="5.x" purpose="Type Safety"/>
+      <technology name="Tailwind CSS" version="3.x" purpose="Utility CSS"/>
+      <technology name="React" version="18.x" purpose="UI Library"/>
+    </frontend>
+    
+    <backend>
+      <technology name="Next.js API Routes" version="14.x" purpose="API Endpoints"/>
+      <technology name="Supabase" version="2.x" purpose="Auth & Database"/>
+      <technology name="PostgreSQL" version="15.x" purpose="Database"/>
+    </backend>
+    
+    <infrastructure>
+      <technology name="Vercel" purpose="Hosting & Edge Functions"/>
+      <technology name="Supabase Cloud" purpose="BaaS"/>
+    </infrastructure>
+  </tech_stack>
+
+  <database_schema>
+    <table name="profiles" extends="auth.users">
+      <column name="id" type="UUID" primary="true" references="auth.users.id"/>
+      <column name="email" type="VARCHAR(255)" unique="true" required="true"/>
+      <column name="name" type="VARCHAR(100)"/>
+      <column name="phone" type="VARCHAR(20)"/>
+      <column name="avatar_url" type="TEXT"/>
+      <column name="marketing_agreed" type="BOOLEAN" default="false"/>
+      <column name="role" type="VARCHAR(50)" default="user"/>
+      <column name="created_at" type="TIMESTAMP" default="NOW()"/>
+      <column name="updated_at" type="TIMESTAMP" default="NOW()"/>
+    </table>
+
+    <table name="social_accounts">
+      <column name="id" type="UUID" primary="true" default="gen_random_uuid()"/>
+      <column name="user_id" type="UUID" references="auth.users.id"/>
+      <column name="provider" type="VARCHAR(50)" required="true"/>
+      <column name="provider_user_id" type="VARCHAR(255)" required="true"/>
+      <column name="provider_email" type="VARCHAR(255)"/>
+      <column name="provider_data" type="JSONB"/>
+      <column name="connected_at" type="TIMESTAMP" default="NOW()"/>
+      <constraint type="unique" columns="provider,provider_user_id"/>
+    </table>
+
+    <table name="auth_logs">
+      <column name="id" type="UUID" primary="true" default="gen_random_uuid()"/>
+      <column name="user_id" type="UUID" references="auth.users.id"/>
+      <column name="event_type" type="VARCHAR(50)" required="true"/>
+      <column name="provider" type="VARCHAR(50)"/>
+      <column name="ip_address" type="INET"/>
+      <column name="user_agent" type="TEXT"/>
+      <column name="metadata" type="JSONB"/>
+      <column name="created_at" type="TIMESTAMP" default="NOW()"/>
+    </table>
+  </database_schema>
+
+  <api_endpoints>
+    <endpoint method="POST" path="/api/auth/signup" description="회원가입"/>
+    <endpoint method="POST" path="/api/auth/signin" description="로그인"/>
+    <endpoint method="POST" path="/api/auth/signout" description="로그아웃"/>
+    <endpoint method="POST" path="/api/auth/refresh" description="토큰 갱신"/>
+    <endpoint method="POST" path="/api/auth/reset-password" description="비밀번호 재설정"/>
+    <endpoint method="GET" path="/api/auth/[provider]" description="OAuth 시작"/>
+    <endpoint method="GET" path="/api/auth/[provider]/callback" description="OAuth 콜백"/>
+    <endpoint method="GET" path="/api/user/profile" description="프로필 조회"/>
+    <endpoint method="PUT" path="/api/user/profile" description="프로필 수정"/>
+    <endpoint method="DELETE" path="/api/user/account" description="회원 탈퇴"/>
+  </api_endpoints>
+
+  <environment_variables>
+    <variable name="NEXT_PUBLIC_SUPABASE_URL" type="string" required="true"/>
+    <variable name="NEXT_PUBLIC_SUPABASE_ANON_KEY" type="string" required="true"/>
+    <variable name="SUPABASE_SERVICE_ROLE_KEY" type="string" required="true" secret="true"/>
+    <variable name="NEXT_PUBLIC_AUTH_EMAIL_ENABLED" type="boolean" default="true"/>
+    <variable name="NEXT_PUBLIC_AUTH_KAKAO_ENABLED" type="boolean" default="false"/>
+    <variable name="NEXT_PUBLIC_AUTH_NAVER_ENABLED" type="boolean" default="false"/>
+    <variable name="KAKAO_CLIENT_ID" type="string" phase="2"/>
+    <variable name="KAKAO_CLIENT_SECRET" type="string" phase="2" secret="true"/>
+    <variable name="NAVER_CLIENT_ID" type="string" phase="2"/>
+    <variable name="NAVER_CLIENT_SECRET" type="string" phase="2" secret="true"/>
+  </environment_variables>
+
+  <folder_structure>
+    <folder path="app">
+      <folder path="(auth)">
+        <file path="signin/page.tsx"/>
+        <file path="signup/page.tsx"/>
+        <file path="callback/route.ts"/>
+      </folder>
+      <folder path="api/auth">
+        <file path="[...auth]/route.ts"/>
+      </folder>
+    </folder>
+    <folder path="lib">
+      <folder path="auth">
+        <folder path="providers">
+          <file path="index.ts"/>
+          <file path="email.ts"/>
+          <file path="kakao.ts"/>
+          <file path="naver.ts"/>
+        </folder>
+      </folder>
+      <folder path="supabase">
+        <file path="client.ts"/>
+        <file path="server.ts"/>
+      </folder>
+    </folder>
+    <folder path="components">
+      <folder path="auth">
+        <file path="UnifiedAuthForm.tsx"/>
+        <file path="SocialButtons.tsx"/>
+      </folder>
+    </folder>
+  </folder_structure>
+
+  <testing_strategy>
+    <test type="unit" tool="Jest" coverage="80%"/>
+    <test type="integration" tool="Jest + Supertest" coverage="70%"/>
+    <test type="e2e" tool="Playwright" scope="critical_flows"/>
+    <test type="load" tool="k6" target="1000_tps"/>
+  </testing_strategy>
+</technical_requirements_document>

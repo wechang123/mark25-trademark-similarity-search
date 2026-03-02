@@ -1,0 +1,1 @@
+// All legacy hooks removed - simplified flow uses services directly
