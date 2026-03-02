@@ -182,7 +182,9 @@ jobs:
     name: 🚀 Deploy Documentation
     runs-on: ubuntu-latest
     needs: [schema-validation, documentation-generation]
-    if: github.ref == 'refs/heads/main' && needs.schema-validation.outputs.validation-passed == 'true'
+    # Disabled by default for new/public repos where GitHub Pages is not configured yet.
+    # Enable by setting repository variable: ENABLE_GH_PAGES_DOCS=true
+    if: github.ref == 'refs/heads/main' && needs.schema-validation.outputs.validation-passed == 'true' && vars.ENABLE_GH_PAGES_DOCS == 'true'
     
     permissions:
       contents: write
